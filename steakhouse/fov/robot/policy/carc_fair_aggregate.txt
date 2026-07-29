@@ -1,0 +1,22 @@
+=== CARC FAIR (150-iter baseline) all-layout aggregate ===
+layouts: 31  cells: 1240  WIN cells: 897 (72%)
+mean time-delta at narrow FOV (30/60/90): -13.3 steps  (negative = module faster)
+wins by fov-set: {'120': 130, '180': 117, '30': 120, '30,360': 101, '30,60,90,120,180,360': 134, '360': 40, '60': 129, '90': 126}
+wins by config: {'s2.0kw4.0ks0.0kt0.0': 187, 's3.0kw3.0ks0.0kt0.0': 183, 's1.5kw2.0ks0.0kt0.0': 181, 's2.0kw2.0ks0.0kt0.0': 181, 's2.0kw2.0ks0.0kt1.0': 165}
+
+top 15 fair speedups (layout / fov / cfg : dt , d_del , base->mod):
+  steak_tshape     30         s2.0kw4.0ks0.0kt0.0  dt= -184.8 dd=+1.77 (329->144)
+  steak_tshape     30         s3.0kw3.0ks0.0kt0.0  dt= -184.6 dd=+1.77 (329->144)
+  steak_tshape     30         s2.0kw2.0ks0.0kt0.0  dt= -177.8 dd=+1.67 (329->151)
+  steak_tshape     60         s2.0kw4.0ks0.0kt0.0  dt= -165.0 dd=+2.00 (354->189)
+  steak_tshape     60         s3.0kw3.0ks0.0kt0.0  dt= -162.8 dd=+2.03 (354->191)
+  steak_test       30         s3.0kw3.0ks0.0kt0.0  dt= -161.7 dd=+1.65 (313->151)
+  steak_test       30         s2.0kw4.0ks0.0kt0.0  dt= -160.1 dd=+1.65 (313->153)
+  steak_tshape     60         s2.0kw2.0ks0.0kt0.0  dt= -154.6 dd=+2.02 (354->199)
+  steak_test       30         s2.0kw2.0ks0.0kt0.0  dt= -139.3 dd=+1.45 (313->174)
+  steak_tshape     30         s1.5kw2.0ks0.0kt0.0  dt= -129.2 dd=+1.13 (329->200)
+  steak_test       30         s1.5kw2.0ks0.0kt0.0  dt= -126.3 dd=+1.15 (313->187)
+  steak_tshape     60         s1.5kw2.0ks0.0kt0.0  dt= -117.4 dd=+1.48 (354->236)
+  steak_test       60         s3.0kw3.0ks0.0kt0.0  dt= -106.3 dd=+1.03 (241->135)
+  steak_test       60         s2.0kw4.0ks0.0kt0.0  dt= -105.3 dd=+1.03 (241->136)
+  steak_tshape     30,60,90,120,180,360 s2.0kw4.0ks0.0kt0.0  dt= -102.5 dd=+1.07 (282->179)

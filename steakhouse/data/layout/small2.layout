@@ -1,0 +1,44 @@
+{
+    "grid":  """XXMXBXX
+                X     W
+                G     X
+                X     X
+                X     X
+                D     O
+                X21   X
+                XXXXSXX""",
+    "start_all_orders" : [
+        { "ingredients" : ["meat","onion"]},
+        { "ingredients" : ["chicken"]},
+        { "ingredients" : ["meat"]},
+        { "ingredients" : ["chicken","onion"]}
+    ],
+    "order_list": ['steak_onion_dish'],
+    "order_display_list": ['steak_onion_dish'],
+    "cook_time": 10,
+    "chicken_time": 40,
+    "steak_time": 10,
+    "delivery_reward": 5,
+    "non_order_delivery_reward": -10,
+    "in_order_delivery_reward": 10,
+    "rew_shaping_params": {"ONION_PICKUP_REWARD": 1,
+                            "MEAT_PICKUP_REWARD": 1,
+                            "DIRTY_PLATE_PICKUP_REWARD": 1,
+                            "CHICKEN_PICKUP_REWARD": 0,
+                            # drop raw ingredient actions
+                            "DROP_DIRTY_PLATE": 2,
+                            "PLACEMENT_IN_POT_REW": 2,
+                            "PLACEMENT_IN_GRILL_REW": 2,
+                            "PLACEMENT_ON_BOARD_REW": 2,
+                            # perform actions on raw ingredients
+                            "RINSE_DIRTY_PLATE": 1,
+                            "CHOPPING_ONION_REW": 1,
+                            # "COMPLETED_RINSE": 4,
+                            # pick up processed ingredients
+                            "CLEAN_PLATE_PICKUP_REWARD":4,
+                            # pick up processed ingredients with clean plate
+                            "BOILED_CHICKEN_PICKUP_REWARD": 8,
+                            "STEAK_PICKUP_REWARD": 8,
+                            "GARNISH_STEAK_REWARD": 10},
+    "enable_same_cell": True,
+}

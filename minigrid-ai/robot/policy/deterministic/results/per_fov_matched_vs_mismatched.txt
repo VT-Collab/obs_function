@@ -1,0 +1,87 @@
+Matched-vs-mismatched FOV comparison, across the max_steps sweep
+==================================================================
+Params: --seeds 50 --fovs 60 120 180 --patience 5 --random-walls
+Each cell = 50 episodes (one true FOV, one condition, one max_steps).
+"matched" static = the static_X condition whose assumed FOV equals the
+true FOV being tested that row (i.e. static has the "right answer" and
+isn't guessing). Everything else is a genuine mismatch.
+
+Success rate (%), grouped by true FOV
+==================================================================
+
+--- max_steps = 190 (env default) ---
+true FOV=60:   static_60(matched)=54.0   static_120=52.0   static_180=50.0   dynamic=56.0
+   dynamic vs matched:   +2.0
+   dynamic vs static_120: +4.0
+   dynamic vs static_180: +6.0
+
+true FOV=120:  static_120(matched)=84.0  static_60=86.0    static_180=72.0   dynamic=86.0
+   dynamic vs matched:    +2.0
+   dynamic vs static_60:   0.0  (tie)
+   dynamic vs static_180: +14.0
+
+true FOV=180:  static_180(matched)=84.0  static_60=80.0    static_120=78.0   dynamic=86.0
+   dynamic vs matched:    +2.0
+   dynamic vs static_60:  +6.0
+   dynamic vs static_120: +8.0
+
+>>> Clean pattern at the default budget: dynamic beats the MATCHED static by
+    a small but consistent +2.0 pts at every true FOV (it isn't just "as
+    good as knowing the truth," it's slightly better, from the entropy-timed
+    response), and beats MISMATCHED statics by 4-14 pts depending on how
+    wrong the guess is. This is the primary result to lead with.
+
+--- max_steps = 300 ---
+true FOV=60:   static_60(matched)=72.0   static_120=74.0   static_180=72.0   dynamic=70.0
+   dynamic vs matched:   -2.0   <-- dynamic UNDERPERFORMS here
+   dynamic vs static_120: -4.0
+   dynamic vs static_180: -2.0
+
+true FOV=120:  static_120(matched)=88.0  static_60=88.0    static_180=86.0   dynamic=90.0
+   dynamic vs matched:    +2.0
+   dynamic vs static_60:   +2.0
+   dynamic vs static_180:  +4.0
+
+true FOV=180:  static_180(matched)=88.0  static_60=84.0    static_120=84.0   dynamic=88.0
+   dynamic vs matched:     0.0  (tie)
+   dynamic vs static_60/120: +4.0
+
+--- max_steps = 500 ---
+true FOV=60:   static_60(matched)=72.0   static_120=74.0   static_180=74.0   dynamic=70.0
+   dynamic vs matched:   -2.0
+   dynamic vs static_120: -4.0
+   dynamic vs static_180: -4.0
+
+true FOV=120:  static_120(matched)=88.0  static_60=88.0    static_180=86.0   dynamic=90.0
+   dynamic vs matched:    +2.0
+   dynamic vs static_60:   +2.0
+   dynamic vs static_180:  +4.0
+
+true FOV=180:  static_180(matched)=88.0  static_60=84.0    static_120=84.0   dynamic=88.0
+   dynamic vs matched:     0.0
+   dynamic vs static_60/120: +4.0
+
+--- max_steps = 1000 ---
+(identical succ% to max_steps=500 at every FOV x condition — matches the
+overall plateau finding: 500 is already the ceiling, more budget doesn't
+change who succeeds, only how long failures take before timing out.)
+
+==================================================================
+HONEST CAVEAT — do not omit this from a paper
+==================================================================
+The "dynamic beats matched static" pattern is clean and consistent at the
+DEFAULT 190-step budget (+2.0 pts at all three true FOVs). At 300+ steps
+it still holds for true FOV=120 and 180, but INVERTS for true FOV=60:
+dynamic actually underperforms every static variant (including the
+mismatched ones) by 2-4 points once the budget is generous. This is a
+real, reproducible finding (identical at 500 and 1000), not noise — worth
+investigating (likely: FOV=60 gives the inference engine the least
+information per step to disambiguate hypotheses, so a larger fraction of
+a long episode is spent in cautious/uncertain mode), but should be
+reported honestly rather than only showing the 190-step table.
+
+==================================================================
+Raw full per-FOV tables (all 7 conditions), for reference
+==================================================================
+See raw_max_steps_{190,300,500,1000}.txt in this same folder for the
+complete eval_three_way.py output each run was extracted from.

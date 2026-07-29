@@ -1,0 +1,27 @@
+# MISHA NEW CHANGE - rank 15/23 from the CARC random search (my_methods/bayesian/fov_parallel_layout_search.py, job2/idx=33).
+# Lightweight scripted robot (grab item, walk to hide spot, stay) + StickySubtaskHumanModel.
+# FOV triple (deg): 32, 108, 132
+# orders: 4x steak | num_items_for_steak=1
+# cook_time=18 chop_time=5 wash_time=8
+# hide_pos=(12, 3)
+# pairs_total(ab,bc,ac) over 120 steps = (85, 49, 63)
+# pairs_late_half(ab,bc,ac) (2nd-half only, sustained-divergence check) = (44, 30, 28)
+# full ranked table + methodology: my_methods/bayesian/fov_search_results.md
+{
+    "grid":  """XXXXXXXXXXXXXXXXX
+                X               X
+                X        1      X
+                X SB    DM    P X
+                X            2  X
+                X O         W   X
+                X               X
+                X               X
+                XXXXXXXXXXXXXXXXX""",
+    "start_order_list": ['steak', 'steak', 'steak', 'steak'],
+    "cook_time": 18,
+    "delivery_reward": 20,
+    'num_items_for_steak': 1,
+    'chop_time': 5,
+    'wash_time': 8,
+    "rew_shaping_params": None
+}

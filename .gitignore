@@ -1,0 +1,73 @@
+# ---- disabled nested repo metadata (755MB of git objects, never commit) ----
+.git_off/
+*.git_off
+
+# ---- OS / editor junk ----
+.DS_Store
+*.swp
+.idea/
+.vscode/*
+!.vscode/settings.json
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.Python
+*.egg-info/
+.eggs/
+*.egg
+build/
+dist/
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+
+# ---- envs ----
+.env
+.venv
+venv/
+env/
+
+# ---- planner caches / pickled artifacts (40G, regenerable) ----
+*.pkl
+*.pickle
+
+# ---- model weights & checkpoints ----
+*.pth
+*.pt
+*.ckpt
+*.h5
+*.hdf5
+*.safetensors
+
+# ---- experiment tracking / logs ----
+wandb/
+*.wandb
+runs/
+lightning_logs/
+dask-worker-space/
+*.log
+slurm-*.out
+
+# ---- large datasets (re-downloadable, not code) ----
+nocturne/data/
+nocturne/build/
+nocturne/third_party/
+steakhouse/data/fov_traj/
+steakhouse/my_methods/data/
+steakhouse/overcooked_ai_py/data/planners/
+steakhouse/overcooked_ai_py/data/testing/
+steakhouse/overcooked_ai_py/data/logs/
+minigrid-ai/wandb/
+minigrid-ai/stale_22ch_checkpoints/
+
+# ---- big media ----
+*.gif
+*.mp4
+*.avi
+
+# ---- bulk CSV results (keep small ones by force-adding: git add -f path.csv) ----
+*.csv

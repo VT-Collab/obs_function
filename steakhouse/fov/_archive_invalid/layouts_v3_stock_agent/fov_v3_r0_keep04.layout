@@ -1,0 +1,33 @@
+# MISHA NEW CHANGE - rank 4/4 from the v3 search
+# (my_methods/bayesian/fov_divergence_search_v2.py, idx=7).
+# Scored with the RNG HELD FIXED across FOVs, so these counts are a real
+# FOV effect and not auto_unstuck's dice (which is what invalidated the
+# v1 fov_search_rank* set - see that script's docstring).
+# human model: plain SteakLimitVisionHumanModel (NOT sticky)
+# teammate: work   kb_update_delay: 2
+# FOV triple (deg): 84, 134, 169
+# seeds tested: 3  (divergence held under ALL of them)
+# min pairwise subtask disagreement, whole episode: 7
+# min pairwise subtask disagreement, latter half   : 3
+# RNG noise floor (same FOV, different seed)       : 4.0
+# distinct subtasks (worst rollout): 7   distinct tiles: 26   min len: 60
+# hide_pos=(5, 5)
+{
+    "grid":  """XXXXXXXXXXXXXXXXX
+                XXXXXBXXXXXXXXMXX
+                XX            1XX
+                XO             XX
+                XX   XXXXS     XX
+                XX             WX
+                XX             XX
+                XX    2        XX
+                XXXPXXXXXXXXDXXXX
+                XXXXXXXXXXXXXXXXX""",
+    "start_order_list": ['steak', 'steak', 'steak'],
+    "cook_time": 15,
+    "delivery_reward": 20,
+    'num_items_for_steak': 1,
+    'chop_time': 2,
+    'wash_time': 5,
+    "rew_shaping_params": None
+}

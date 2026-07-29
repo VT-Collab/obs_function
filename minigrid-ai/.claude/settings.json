@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//Users/mishafu/miniconda3/envs/**)",
+      "Bash(conda run *)",
+      "Bash(cat)",
+      "Bash(/Users/mishafu/miniconda3/envs/minigrid/bin/python /tmp/debug3.py)",
+      "Bash(python -m py_compile planning/bayes_planner.py agents/bayes_agent.py)",
+      "Bash(/Users/mishafu/miniconda3/envs/minigrid/bin/python /tmp/fixed_fov_test.py 90)",
+      "Bash(grep -v \"^$\")",
+      "Bash(python scripts/collect_bayes_traj.py --no-render --seeds 0 1 2 3 4 5 6 7 8 9 --fov 90)",
+      "Bash(python -c \"import minigrid; print\\('ok'\\)\")",
+      "Bash(python3 -c \"import gymnasium\")",
+      "Bash(conda activate *)",
+      "Bash(conda env *)",
+      "Read(//Users/mishafu/.conda/**)",
+      "Bash(~/miniconda3/envs/minigrid/bin/python -c \"import gymnasium; print\\('ok'\\)\")",
+      "Bash(~/miniconda3/envs/minigrid/bin/python scripts/collect_bayes_traj.py --no-render --seeds 0 1 2 3 4 5 6 7 8 9 --fov 90)",
+      "Bash(~/miniconda3/envs/minigrid/bin/python scripts/collect_bayes_traj.py --no-render --seeds 0 --fov 90)",
+      "Bash(~/miniconda3/envs/minigrid/bin/python scripts/collect_bayes_traj.py --no-render --seeds 5 --fov 90)",
+      "Bash(~/miniconda3/envs/minigrid/bin/python scripts/collect_bayes_traj.py --no-render --seeds 0 1 2 3 4 5 6 7 8 9 --fov 120)",
+      "Bash(~/miniconda3/envs/minigrid/bin/python scripts/collect_bayes_traj.py --no-render --seeds 0 1 2 3 4 5 6 7 8 9 --fov 179)",
+      "Bash(~/miniconda3/envs/minigrid/bin/python scripts/collect_bayes_traj.py --no-render --seeds 5 --fov 120)",
+      "Bash(awk '/find_key.*← changed/{found=1} found{print}')",
+      "Bash(~/miniconda3/envs/minigrid/bin/python -c ' *)",
+      "Bash(conda info *)",
+      "Bash(~/miniconda3/envs/minigrid/bin/python scripts/collect_bayes_traj.py --no-render --seeds 2 --fov 90)",
+      "Bash(python -c \"import sys; sys.path.insert\\(0,'.'\\); import planning.bayes_planner; print\\('OK'\\)\")",
+      "Bash(python3 -m py_compile /Users/mishafu/Desktop/minigrid-ai/planning/bayes_planner.py)"
+    ]
+  }
+}
