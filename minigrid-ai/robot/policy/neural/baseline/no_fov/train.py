@@ -76,7 +76,8 @@ def make_env(args):
     env = NoFovAssistEnv(comm_cost=args.comm_cost,
                          seeds=range(args.seed_start, args.seed_start + args.seed_count),
                          time_cost=args.time_cost,
-                         key_bonus=args.key_bonus)
+                         key_bonus=args.key_bonus,
+                         shaping=args.shaping)
     env.reset(seed=args.seed)
     return env
 
@@ -216,6 +217,12 @@ def main():
     p.add_argument("--time-cost", type=float, default=0.005,
                    help="cost per env step. Keep equal to --comm-cost; see the note above "
                         "for why 0.005 and not the 0.015 that was in use before.")
+    p.add_argument("--shaping", type=float, default=0.0,
+                   help="dense potential-based shaping scale, F=gamma*PHI(s')-PHI(s) with "
+                        "PHI = -griddist(human -> next needed thing). Pure geometry, no FOV. "
+                        "0 disables. This is the per-step signal the ORIGINAL baseline had "
+                        "(silently at 1.0) and the only thing that has ever produced a "
+                        "state-dependent policy in this env.")
     p.add_argument("--key-bonus", type=float, default=0.15,
                    help="one-shot reward when the human picks up the key that opens the "
                         "goal room. Pure grid geometry, no FOV. 0 disables.")

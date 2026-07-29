@@ -34,7 +34,8 @@ class NoFovAssistEnv(gym.Env):
                      comm_cost: float = 0.005, max_steps: int = 190,
                      random_walls: bool = True,
                      time_cost: float = 0.005,
-                     key_bonus: float = 0.15):   # NEW; 0.0 disables
+                     key_bonus: float = 0.15,    # NEW; 0.0 disables
+                     shaping: float = 0.0):      # NEW; 0.0 disables
 
         self.human_fovs = list(human_fovs)
         self.seeds = list(seeds)
@@ -43,6 +44,8 @@ class NoFovAssistEnv(gym.Env):
         self.random_walls = random_walls
         self.time_cost = time_cost
         self.key_bonus = key_bonus
+        self.shaping = shaping
+        self.gamma = 0.99          # must match the learner's discount
 
         self.observation_space = gym.spaces.Box(0.0, 1.0, shape=OBS_SHAPE, dtype=np.float32)
         self.action_space = gym.spaces.Discrete(N_ACTIONS)
@@ -71,7 +74,49 @@ class NoFovAssistEnv(gym.Env):
         self._correct_color = self._correct_key_color()
         self._key_bonus_paid = False
 
+        #NEW: distance fields for the dense shaping term. Built once per episode
+        #from the grid alone; doors count as passable because a door is a detour,
+        #not a wall.
+        keys, _, goal = self._scan()
+        self._norm = float(4 * (self.state.width + self.state.height))
+        self._dist_goal = self._bfs(goal)
+        self._dist_key = self._bfs(keys.get(self._correct_color)) if self._correct_color \
+            else self._dist_goal
+        self._prev_phi = self._phi()
+
         return self._observe(), {}
+
+    # NEW: steps from every cell to `cell`, walls impassable, doors passable.
+    # Uses grid.get(x, y) directly, so there is no encode() index to get wrong.
+    def _bfs(self, cell):
+        st = self.state
+        W, H = st.width, st.height
+        cap = 4 * (W + H)
+        d = np.full((W, H), cap, dtype=np.int32)
+        if cell is None:
+            return d
+        d[cell[0], cell[1]] = 0
+        q = deque([cell])
+        while q:
+            x, y = q.popleft()
+            for nx, ny in ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)):
+                if not (0 <= nx < W and 0 <= ny < H) or d[nx, ny] != cap:
+                    continue
+                if getattr(st.grid.get(nx, ny), "type", None) == "wall":
+                    continue
+                d[nx, ny] = d[x, y] + 1
+                q.append((nx, ny))
+        return d
+
+    # NEW: the shaping potential. -normalised distance to whatever the human needs
+    # next: the key that opens the goal room while they lack it, the goal once they
+    # hold it. A pure function of (grid, position, what they carry) - all physically
+    # observable. Never touches the human's knowledge base or FOV.
+    def _phi(self):
+        ax, ay = self.state.agent_pos
+        held = getattr(getattr(self.state, "carrying", None), "color", None)
+        field = self._dist_goal if held == self._correct_color else self._dist_key
+        return -float(field[ax, ay]) / self._norm
 
     #return the state as layers of layout
     def _observe(self):
@@ -255,6 +300,17 @@ class NoFovAssistEnv(gym.Env):
                     and getattr(held, "color", None) == self._correct_color):
                 self._key_bonus_paid = True
                 reward += self.key_bonus
+
+        #NEW: dense geometric shaping, F = gamma*PHI(s') - PHI(s). Ng, Harada &
+        #Russell 1999: this exact form is provably policy-invariant, so it can only
+        #speed learning, never redefine the task. PHI is grid distance only - no
+        #knowledge base, no FOV. This is the per-step signal the old baseline had
+        #(accidentally, at strength 1.0) and the only thing that ever produced a
+        #state-dependent policy here; without it PPO settles on the best constant.
+        if self.shaping:
+            phi = self._phi()
+            reward += self.shaping * (self.gamma * phi - self._prev_phi)
+            self._prev_phi = phi
 
         reward -= self.time_cost
         

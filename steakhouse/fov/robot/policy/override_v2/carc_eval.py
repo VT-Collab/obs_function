@@ -1,0 +1,94 @@
+"""
+Big eval-only sweep (no training): for one layout, load its saved FOV-blind
+baseline and compare it against the module in BOTH decision modes, across every
+FOV, with MANY seeds. Per (mode, fov) we report mean delivered, mean time-to-3,
+win-rate (fraction of seeds the module is >= on delivery AND faster / more), and
+rescues (seeds where the baseline stalled below 3 but the module reached 3).
+
+Run: python -m fov.robot.policy.override_v2.carc_eval <layout> [n_eps] [outdir] [ckpt_dir]
+"""
+import csv
+import os
+import sys
+
+import numpy as np
+import torch
+
+from fov.robot.policy.baseline.policy import ActorCritic
+from fov.robot.policy.baseline.env_wrapper import RobotAssistEnv, CANDIDATE_FOVS
+from fov.robot.policy.override_v2.env import OverrideEnv
+from fov.robot.policy.override_v2._util import quiet
+
+MODES = ["assist", "coordinate"]
+HZN = 400
+
+
+def episode(env, net):
+    with quiet():
+        o = env.reset(); done = False; t = 0; deliv = 0; t3 = HZN
+        while not done:
+            x = torch.as_tensor(o, dtype=torch.float32).unsqueeze(0)
+            with torch.no_grad():
+                a, _, _, _ = net.act(x)
+            o, r, done, info = env.step(int(a.item())); t += 1
+            if info["delivered"] > deliv:
+                deliv = info["delivered"]
+                if deliv >= 3 and t3 == HZN:
+                    t3 = t
+    return deliv, t3
+
+
+def main():
+    layout = sys.argv[1] if len(sys.argv) > 1 else "steak_gc00"
+    n_eps = int(sys.argv[2]) if len(sys.argv) > 2 else 30
+    outdir = sys.argv[3] if len(sys.argv) > 3 else "carc_results_mods"
+    ckdir = sys.argv[4] if len(sys.argv) > 4 else "carc_results_cons"
+    os.makedirs(outdir, exist_ok=True)
+
+    net = ActorCritic()
+    net.load_state_dict(torch.load(os.path.join(ckdir, f"baseline_{layout}.pt"),
+                                   map_location="cpu"))
+    net.eval()
+
+    # baseline once per (fov, seed) - shared across modes
+    base = {}
+    for fov in CANDIDATE_FOVS:
+        for s in range(n_eps):
+            base[(fov, s)] = episode(
+                RobotAssistEnv(layout=layout, fovs=[fov], horizon=HZN, seed=s), net)
+        print(f"[{layout}] baseline fov={fov} done", file=sys.stderr, flush=True)
+
+    rows = []
+    for mode in MODES:
+        for fov in CANDIDATE_FOVS:
+            bd, md, bt, mt, wins, rescues = [], [], [], [], 0, 0
+            for s in range(n_eps):
+                b_d, b_t = base[(fov, s)]
+                oe = OverrideEnv(layout=layout, fovs=[fov], horizon=HZN, seed=s, mode=mode)
+                m_d, m_t = episode(oe, net)
+                bd.append(b_d); md.append(m_d); bt.append(b_t); mt.append(m_t)
+                if (m_d > b_d) or (m_d == b_d and m_t < b_t):
+                    wins += 1
+                if b_d < 3 and m_d >= 3:
+                    rescues += 1
+            rows.append(dict(layout=layout, mode=mode, fov=fov,
+                             base_dlv=round(float(np.mean(bd)), 3),
+                             mod_dlv=round(float(np.mean(md)), 3),
+                             base_t3=round(float(np.mean(bt)), 1),
+                             mod_t3=round(float(np.mean(mt)), 1),
+                             winrate=round(wins / n_eps, 3), rescues=rescues, n=n_eps))
+            print(f"[{layout}] {mode} fov={fov} done", file=sys.stderr, flush=True)
+
+    out = os.path.join(outdir, f"mods_{layout}.csv")
+    with open(out, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["layout", "mode", "fov", "base_dlv",
+                                          "mod_dlv", "base_t3", "mod_t3",
+                                          "winrate", "rescues", "n"])
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+    print(f"[{layout}] wrote {out}", file=sys.stderr, flush=True)
+
+
+if __name__ == "__main__":
+    main()
