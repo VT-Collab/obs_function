@@ -6,7 +6,7 @@ direction: pure layout geometry only ever DELAYS convergence to the correct
 task order, it can't change it - because SteakLimitVisionHumanModel.ml_action()
 (agent.py:1472) recomputes "which subtask is objectively best right now" from
 scratch on almost every call. The ONLY subtasks that get any commitment in the
-base class are chop_onion/heat_hot_plate (agent.py:1579-1584, via a
+base class are chop_onion/heat_washed_plate (agent.py:1579-1584, via a
 `self.prev_chosen_subtask in [...]` check) - pickup_meat/pickup_onion/
 pickup_plate/etc all get re-derived fresh every step from current (possibly
 now-updated) knowledge.
@@ -30,7 +30,7 @@ from overcooked_ai_py.agents.agent import SteakLimitVisionHumanModel
 
 STICKY_SUBTASKS = {
     'pickup_meat', 'pickup_onion', 'pickup_plate',
-    'pickup_hot_plate', 'pickup_steak', 'pickup_garnish',
+    'pickup_washed_plate', 'pickup_steak', 'pickup_garnish',
 }
 
 

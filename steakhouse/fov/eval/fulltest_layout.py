@@ -20,7 +20,7 @@ from overcooked_ai_py.agents.agent import GreedySteakHumanModel
 from fov.human.agent.limited_vision_human import LimitedVisionSteakHuman
 from fov.human.planning.steak_planner import SteakMotionPlanner
 from fov.human.test_fov_conditions import real_divergence
-from fov.robot.inference.evaluate_sampling_inference import run_episode as infer_ep
+from steakhouse.fov.robot.policy.old.inference.evaluate_sampling_inference import run_episode as infer_ep
 
 FOVS = [30, 60, 90, 120, 180, 360]
 PREF = ("ready", "cooking", "chopping", "washing", "occupied", "empty")

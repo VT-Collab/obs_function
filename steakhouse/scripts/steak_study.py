@@ -465,13 +465,13 @@ def kb_diff_measure(human_kb, world_kb):
 def obj_held_freq(robot_holding_log, human_holding_log):
     obj_held_freq_dict = {}
     obj_diff_dict = {}
-    obj_list = ['onion', 'meat', 'plate', 'hot_plate', 'steak', 'dish']
+    obj_list = ['onion', 'meat', 'plate', 'washed_plate', 'steak', 'dish']
     for obj_name in obj_list:
         obj_held_freq_dict[obj_name] = [robot_holding_log[obj_name], human_holding_log[obj_name]]
         obj_diff_dict[obj_name] = (robot_holding_log[obj_name] - human_holding_log[obj_name])
     prep_count = [robot_holding_log['onion'] + robot_holding_log['meat'] + robot_holding_log['plate'], human_holding_log['onion'] + human_holding_log['meat'] + human_holding_log['plate']]
     prep_count_diff = prep_count[0] - prep_count[1]
-    plating_count = [robot_holding_log['hot_plate'] + robot_holding_log['steak'] + robot_holding_log['dish'],human_holding_log['hot_plate'] + human_holding_log['steak'] + human_holding_log['dish']]
+    plating_count = [robot_holding_log['washed_plate'] + robot_holding_log['steak'] + robot_holding_log['dish'],human_holding_log['washed_plate'] + human_holding_log['steak'] + human_holding_log['dish']]
     plating_count_diff = plating_count[0] - plating_count[1]
 
     return obj_held_freq_dict, obj_diff_dict, prep_count, prep_count_diff, plating_count, plating_count_diff
@@ -647,8 +647,8 @@ def replay_with_joint_actions(lvl_str, joint_actions, plot=True, log_dir=None, l
     checkpoints = [env.horizon - 1] * env.num_orders
     cur_order = 0
     world_kb_log = []
-    robot_holding = {'meat': 0, 'onion': 0, 'plate': 0, 'hot_plate': 0, 'steak': 0, 'dish':0}
-    human_holding = {'meat': 0, 'onion': 0, 'plate': 0, 'hot_plate': 0, 'steak': 0, 'dish':0}
+    robot_holding = {'meat': 0, 'onion': 0, 'plate': 0, 'washed_plate': 0, 'steak': 0, 'dish':0}
+    human_holding = {'meat': 0, 'onion': 0, 'plate': 0, 'washed_plate': 0, 'steak': 0, 'dish':0}
     prev_robot_hold = 'None'
     prev_human_hold = 'None'
     robot_in_bound_count = []

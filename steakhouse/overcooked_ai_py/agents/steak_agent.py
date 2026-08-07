@@ -1446,8 +1446,8 @@ class limitVisionHumanModel(GreedyHumanModel):
             elif player_obj.name == 'dish':
                 motion_goals = am.deliver_dish_actions()
 
-            elif player_obj.name == 'hot_plate':
-                motion_goals = am.pickup_steak_with_hot_plate_actions(pot_states_dict, only_nearly_ready=True)
+            elif player_obj.name == 'washed_plate':
+                motion_goals = am.pickup_steak_with_washed_plate_actions(pot_states_dict, only_nearly_ready=True)
 
             elif player_obj.name == 'soup':
                 motion_goals = am.deliver_soup_actions()

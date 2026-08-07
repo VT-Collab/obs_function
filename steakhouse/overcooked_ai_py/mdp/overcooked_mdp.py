@@ -47,7 +47,7 @@ from overcooked_ai_py.mdp.graphics import *
 #             valid_item_num = (1 <= num_items <= 3)
 #             valid_cook_time = (0 <= cook_time)
 #             return valid_soup_type and valid_item_num and valid_cook_time
-#         elif self.name in ['steak', 'garnish', 'hot_plate']:
+#         elif self.name in ['steak', 'garnish', 'washed_plate']:
 #             prep_time = self.state
 #             valid_prep_time = (0 <= prep_time)
 #             return valid_prep_time
@@ -122,7 +122,7 @@ class ObjectState(object):
             valid_item_num = (1 <= num_items <= 3)
             valid_cook_time = (0 <= cook_time)
             return valid_soup_type and valid_item_num and valid_cook_time
-        elif self.name in ['steak', 'garnish', 'hot_plate']:
+        elif self.name in ['steak', 'garnish', 'washed_plate']:
             prep_time = self.state
             valid_prep_time = (0 <= prep_time)
             return valid_prep_time
@@ -572,6 +572,10 @@ EVENT_TYPES = [
     'steak_cooking',
     'steak_pickup',
     'steak_drop',
+    # 'steak' is the grill-resident object; 'steak_dish' is plate + steak, the
+    # thing a player actually carries and can set down on a counter.
+    'steak_dish_pickup',
+    'steak_dish_drop',
 
     # Plate events
     'plate_pickup',
@@ -580,12 +584,15 @@ EVENT_TYPES = [
     'plate_heating',
 
     # Hot plate events
-    'hot_plate_pickup',
+    'washed_plate_pickup',
 
     # Garnish events
     'onion_chopping',
     'garnish_pickup',
     'garnish_drop',
+    # 'garnish' is the bare chopped onion; 'garnish_dish' is plate + garnish.
+    'garnish_dish_pickup',
+    'garnish_dish_drop',
 ]
 
 SIMPLE_EVENT_TYPES = [
@@ -620,7 +627,7 @@ SIMPLE_EVENT_TYPES = [
     'plate_heating',
 
     # Hot plate events
-    'hot_plate_pickup',
+    'washed_plate_pickup',
 
     # Garnish events
     'onion_chopping',
@@ -896,7 +903,31 @@ class OvercookedGridworld(object):
         self.resolve_movement(new_state, joint_action)
 
         # Finally, environment effects
-        self.step_environment_effects(new_state)
+        just_finished = self.step_environment_effects(new_state) or []
+
+        # COOKING_STEAK_REW, rebuilt as a COMPLETION bonus.
+        #
+        # The old version paid this inside resolve_interacts, once per INTERACT,
+        # to a player standing at a cooking pot holding meat -- which also
+        # hand-cranked the timer. That was farmable (3 * cook_time per steak) and
+        # let a steak cook at double speed. Cooking is now fully automatic, so
+        # the reward fires HERE instead: once, on the tick the steak crosses
+        # steak_cooking_time. It cannot be farmed, because no action influences
+        # when it arrives.
+        #
+        # Paid to BOTH players. A finished steak is a team outcome and the pot is
+        # unattended by construction, so there is no honest way to attribute it
+        # to one chef -- and the self-play wrapper shares reward anyway. The
+        # signal it carries is "meat in the pot earlier pays off", which pairs
+        # with the immediate PLACEMENT_IN_POT_REW at the other end of the wait.
+        if just_finished:
+            rew = self.reward_shaping_params.get("COOKING_STEAK_REW", 0)
+            if rew:
+                for player_idx in range(self.num_players):
+                    shaped_reward[player_idx] += rew * len(just_finished)
+                for pos in just_finished:
+                    for player_idx in range(self.num_players):
+                        events_infos['steak_cooking'][player_idx] = True
 
         # Additional dense reward logic
         # shaped_reward += self.calculate_distance_based_shaped_reward(state, new_state)
@@ -1412,7 +1443,7 @@ class OvercookedGridworld(object):
 
         # Borders must not be free spaces
         def is_not_free(c):
-            return c in 'XOPDSTWMB'
+            return c in 'XOPDSTWMB#'
 
         for y in range(height):
             assert is_not_free(grid[y][0]), 'Left border must not be free'
@@ -1430,7 +1461,7 @@ class OvercookedGridworld(object):
         assert layout_digits == list(range(1, num_players +
                                            1)), "Some players were missing"
 
-        assert all(c in 'XOPDSTBWM123456789 '
+        assert all(c in 'XOPDSTBWM#123456789 '
                    for c in all_elements), 'Invalid character in grid'
         assert all_elements.count('1') == 1, "'1' must be present exactly once"
         assert all_elements.count(
@@ -2107,6 +2138,17 @@ class SteakHouseGridworld(OvercookedGridworld):
     """
     ORDER_TYPES = ObjectState.SOUP_TYPES + ['steak','any']
 
+    # (held, on-counter) -> what the player ends up holding after one INTERACT.
+    # Anything NOT listed here is a no-op: hands full at an occupied counter
+    # never swaps. steak_dish + garnish_dish is deliberately absent -- two
+    # plates cannot merge.
+    COUNTER_COMBINE = {
+        ('garnish',      'washed_plate'): 'garnish_dish',
+        ('garnish',      'steak_dish'):   'dish',
+        ('steak_dish',   'garnish'):      'dish',
+        ('washed_plate', 'garnish'):      'garnish_dish',
+    }
+
     #########################
     # INSTANTIATION METHODS #
     #########################
@@ -2279,19 +2321,22 @@ class SteakHouseGridworld(OvercookedGridworld):
                     player.set_object(obj)
                 
                 elif player.has_object() and new_state.has_object(i_pos):
-                    obj_name = player.get_object().name
-                    player_obj = player.remove_object()
-
-                    # Pick up object from counter
-                    self.log_object_pickup(events_infos, new_state, obj_name,
-                                           pot_states, player_idx)
-                    obj = new_state.remove_object(i_pos)
-                    player.set_object(obj)
-
-                    # Drop object on counter
-                    self.log_object_drop(events_infos, new_state, obj_name,
-                                         pot_states, player_idx)
-                    new_state.add_object(player_obj, i_pos)
+                    # No swapping. Hands full at an occupied counter only does
+                    # something if the two objects COMBINE (COUNTER_COMBINE);
+                    # every other pairing is an inert INTERACT.
+                    pair = (player.get_object().name,
+                            new_state.get_object(i_pos).name)
+                    combined = self.COUNTER_COMBINE.get(pair)
+                    if combined is not None:
+                        self.log_object_pickup(events_infos, new_state, combined,
+                                               pot_states, player_idx)
+                        player.remove_object()
+                        new_state.remove_object(i_pos)
+                        new_o_id = obj_count
+                        new_obj = ObjectState(new_o_id, combined, pos)
+                        if not rollout: self.object_id_dict[new_o_id] = new_obj
+                        obj_count += 1
+                        player.set_object(new_obj)
 
 
             elif terrain_type == 'O' and player.held_object is None:
@@ -2338,8 +2383,8 @@ class SteakHouseGridworld(OvercookedGridworld):
             elif terrain_type == 'W':
                 if player.held_object is None:
                     # pick up clean plates
-                    if self.plate_hot_at_location(new_state, i_pos):
-                        self.log_object_pickup(events_infos, new_state, "hot_plate",
+                    if self.plate_washed_at_location(new_state, i_pos):
+                        self.log_object_pickup(events_infos, new_state, "washed_plate",
                                         pot_states, player_idx)
                         obj = new_state.remove_object(i_pos)
                         player.set_object(obj)
@@ -2363,17 +2408,33 @@ class SteakHouseGridworld(OvercookedGridworld):
                                 # Log onion potting
                                 events_infos['plate_heating'][player_idx] = True
 
-                else: # sink is empty and put plate
-                    if player.get_object().name == "plate" and not new_state.has_object(i_pos):  
+                else: # hands full at the sink
+                    held_name = player.get_object().name
+
+                    # spec 2.c.i -- a player carrying garnish lifts the finished
+                    # washed plate straight into a garnish_dish
+                    if held_name == 'garnish' and self.plate_washed_at_location(new_state, i_pos):
+                        self.log_object_pickup(events_infos, new_state, "garnish_dish",
+                                               pot_states, player_idx)
+                        player.remove_object()
+                        new_state.remove_object(i_pos)
+                        new_o_id = obj_count
+                        new_obj = ObjectState(new_o_id, 'garnish_dish', pos)
+                        if not rollout: self.object_id_dict[new_o_id] = new_obj
+                        obj_count += 1
+                        player.set_object(new_obj)
+                        player.num_plate_held += 1
+
+                    elif held_name == "plate" and not new_state.has_object(i_pos):
                         obj_name = player.get_object().name
                         self.log_object_drop(events_infos, new_state, obj_name,
                                             pot_states, player_idx)
 
-                    
+
                         # Drop object on counter
                         obj = player.remove_object()
                         new_o_id = obj_count
-                        new_obj = ObjectState(new_o_id, 'hot_plate', i_pos, 0)
+                        new_obj = ObjectState(new_o_id, 'washed_plate', i_pos, 0)
                         if not rollout: self.object_id_dict[new_o_id] = new_obj
                         obj_count += 1
                         new_state.add_object(new_obj, i_pos) # wash time = 0
@@ -2381,49 +2442,68 @@ class SteakHouseGridworld(OvercookedGridworld):
             elif terrain_type == 'P' and player.has_object():
 
                 if player.get_object(
-                ).name == 'hot_plate' and self.steak_ready_at_location(
+                ).name == 'washed_plate' and self.steak_ready_at_location(
                         new_state, i_pos):
-                    self.log_object_pickup(events_infos, new_state, "steak",
+                    self.log_object_pickup(events_infos, new_state, "steak_dish",
                                            pot_states, player_idx)
 
-                    # Pick up steak
-                    player.remove_object()  # Remove the hot plate
-                    obj = new_state.remove_object(i_pos)  # Get steak
-                    player.set_object(obj)
+                    # Plate the steak. The hot plate and the grill's 'steak' are
+                    # both consumed, and what the player carries away is a NEW
+                    # 'steak_dish' object = plate + steak. Previously the grill's
+                    # object was handed over directly, which meant one name meant
+                    # two things: a steak COOKING on the grill and a plated steak
+                    # in hand. Minting a new object keeps 'steak' the grill-only
+                    # name, so steak_ready_at_location / get_pot_states /
+                    # step_environment_effects all go on working untouched.
+                    player.remove_object()          # hot plate consumed
+                    new_state.remove_object(i_pos)  # cooked steak leaves the grill
+                    new_o_id = obj_count
+                    new_obj = ObjectState(new_o_id, 'steak_dish', pos)
+                    if not rollout: self.object_id_dict[new_o_id] = new_obj
+                    obj_count += 1
+                    player.set_object(new_obj)
                     # shaped_reward[player_idx] += self.reward_shaping_params[
                         # "STEAK_PICKUP_REWARD"]
-                
-                elif player.get_object().name == 'meat':
-                    item_type = player.get_object().name
 
-                    if not new_state.has_object(i_pos):
-                        # Pot was empty, add meat to it
-                        player.remove_object()
-                        new_o_id = obj_count
-                        new_obj = ObjectState(new_o_id, 'steak', i_pos, ('steak', 1, 0))
-                        if not rollout: self.object_id_dict[new_o_id] = new_obj
-                        obj_count += 1
-                        new_state.add_object(new_obj, i_pos)
-                        shaped_reward[
-                            player_idx] += self.reward_shaping_params[
-                                "PLACEMENT_IN_POT_REW"]
+                # spec 1.c -- the pot also accepts an already-garnished plate,
+                # which completes the dish in the other assembly order.
+                elif player.get_object().name == 'garnish_dish' and \
+                        self.steak_ready_at_location(new_state, i_pos):
+                    self.log_object_pickup(events_infos, new_state, "dish",
+                                           pot_states, player_idx)
+                    player.remove_object()          # garnish_dish consumed
+                    new_state.remove_object(i_pos)  # cooked steak leaves the grill
+                    new_o_id = obj_count
+                    new_obj = ObjectState(new_o_id, 'dish', pos)
+                    if not rollout: self.object_id_dict[new_o_id] = new_obj
+                    obj_count += 1
+                    player.set_object(new_obj)
 
-                        # Log meat cooking
-                        events_infos['steak_cooking'][player_idx] = True
+                elif player.get_object().name == 'meat' and not new_state.has_object(i_pos):
+                    # Pot was empty, add meat to it. Cooking then runs on its own
+                    # in step_environment_effects -- spec 1.b, NO interaction is
+                    # allowed while it cooks.
+                    #
+                    # The branch that used to live here let a player holding meat
+                    # hand-crank the cook timer and collect COOKING_STEAK_REW on
+                    # every tick. That both cooked the steak at double speed (its
+                    # own tick plus the automatic one) and was farmable for
+                    # 3 * cook_time per steak whenever the mdp was built with
+                    # BASE_REW_SHAPING_PARAMS, which every training entry point
+                    # does. Removing it makes PLACEMENT_IN_POT_REW the only
+                    # shaped reward the mdp itself pays.
+                    player.remove_object()
+                    new_o_id = obj_count
+                    new_obj = ObjectState(new_o_id, 'steak', i_pos, ('steak', 1, 0))
+                    if not rollout: self.object_id_dict[new_o_id] = new_obj
+                    obj_count += 1
+                    new_state.add_object(new_obj, i_pos)
+                    shaped_reward[
+                        player_idx] += self.reward_shaping_params[
+                            "PLACEMENT_IN_POT_REW"]
 
-                    else:
-                        # Pot has already meat in it
-                        obj = new_state.get_object(i_pos)
-                        assert obj.name == 'steak', 'Object in pot was not steak'
-                        food_type, num_items, cook_time = obj.state
-                        if cook_time < self.steak_cooking_time:
-                            obj.state = food_type, num_items, cook_time + 1
-                            shaped_reward[
-                                player_idx] += self.reward_shaping_params[
-                                    "COOKING_STEAK_REW"]
-
-                            # Log onion potting
-                            events_infos['steak_cooking'][player_idx] = True
+                    # Log meat cooking
+                    events_infos['steak_cooking'][player_idx] = True
 
             elif terrain_type == 'S' and player.has_object():
                 obj = player.get_object()
@@ -2456,6 +2536,23 @@ class SteakHouseGridworld(OvercookedGridworld):
                             # Log onion chopping
                             events_infos['onion_chopping'][player_idx] = True
 
+                        else:
+                            # spec 3.c.i -- fully chopped and hands empty: carry
+                            # the garnish away. Mint a FRESH object: the board's
+                            # garnish carries the int chop timer as its state, and
+                            # a carried one with a stale timer would read as "still
+                            # chopping" to anything inspecting it.
+                            self.log_object_pickup(events_infos, new_state, "garnish",
+                                                   pot_states, player_idx)
+                            new_state.remove_object(i_pos)
+                            new_o_id = obj_count
+                            new_obj = ObjectState(new_o_id, 'garnish', pos)
+                            if not rollout: self.object_id_dict[new_o_id] = new_obj
+                            obj_count += 1
+                            player.set_object(new_obj)
+                        
+                        
+
                 elif player.get_object().name == 'onion' and not new_state.has_object(i_pos):
                     # Chopping board was empty, add onion to it
                     player.remove_object()
@@ -2471,9 +2568,23 @@ class SteakHouseGridworld(OvercookedGridworld):
                     # Log onion potting
                     events_infos['onion_chopping'][player_idx] = True
 
+                # spec 3.c.i -- a WASHED plate (not a dirty one) collects the
+                # garnish, giving the garnish-first assembly order.
+                elif player.get_object().name == 'washed_plate' and \
+                        self.garnish_ready_at_location(new_state, i_pos):
+                    self.log_object_pickup(events_infos, new_state, "garnish_dish",
+                                           pot_states, player_idx)
+                    player.remove_object()
+                    new_state.remove_object(i_pos)
+                    new_o_id = obj_count
+                    new_obj = ObjectState(new_o_id, 'garnish_dish', pos)
+                    if not rollout: self.object_id_dict[new_o_id] = new_obj
+                    obj_count += 1
+                    player.set_object(new_obj)
+
                 # Pick up garnish
-                elif player.get_object().name == 'steak' and self.garnish_ready_at_location(new_state, i_pos):
-                    player.remove_object() # Remove the hot plate
+                elif player.get_object().name == 'steak_dish' and self.garnish_ready_at_location(new_state, i_pos):
+                    player.remove_object() # the plated steak is consumed
                     self.log_object_pickup(events_infos, new_state, "dish",
                                            pot_states, player_idx)
 
@@ -2509,6 +2620,11 @@ class SteakHouseGridworld(OvercookedGridworld):
         return state, 0
     
     def step_environment_effects(self, state):
+        """Advance the automatic clocks. Returns the pot positions where a steak
+        finished cooking on THIS tick, so get_state_transition can pay
+        COOKING_STEAK_REW exactly once per steak (see below). Callers that do not
+        care about the reward can ignore the return value."""
+        just_finished = []
         for obj in state.objects.values():
             if obj.name == 'soup':
                 x, y = obj.position
@@ -2526,6 +2642,9 @@ class SteakHouseGridworld(OvercookedGridworld):
                 if self.terrain_mtx[y][x] == 'P' and \
                     cook_time < self.steak_cooking_time:
                     obj.state = food_type, num_items, cook_time + 1
+                    if cook_time + 1 == self.steak_cooking_time:
+                        just_finished.append((x, y))
+        return just_finished
     
     #######################
     # LAYOUT / STATE INFO #
@@ -2655,11 +2774,11 @@ class SteakHouseGridworld(OvercookedGridworld):
         _, _, cook_time = obj.state
         return cook_time >= self.steak_cooking_time
     
-    def plate_hot_at_location(self, state, pos):
+    def plate_washed_at_location(self, state, pos):
         if not state.has_object(pos):
             return False
         obj = state.get_object(pos)
-        assert obj.name == 'hot_plate', 'Object in sink was not hot plate'
+        assert obj.name == 'washed_plate', 'Object in sink was not hot plate'
         prep_time = obj.state
         return prep_time >= self.wash_time
     
@@ -2689,7 +2808,7 @@ class SteakHouseGridworld(OvercookedGridworld):
 
         # Borders must not be free spaces
         def is_not_free(c):
-            return c in 'XOPDSTMWB'
+            return c in 'XOPDSTMWB#'
 
         for y in range(height):
             assert is_not_free(grid[y][0]), 'Left border must not be free'
@@ -2707,7 +2826,7 @@ class SteakHouseGridworld(OvercookedGridworld):
         assert layout_digits == list(range(1, num_players +
                                            1)), "Some players were missing"
 
-        assert all(c in 'XOPDSTWMB123456789 '
+        assert all(c in 'XOPDSTWMB#123456789 '
                    for c in all_elements), 'Invalid character in grid'
         assert all_elements.count('1') == 1, "'1' must be present exactly once"
         assert all_elements.count(
@@ -2729,7 +2848,8 @@ class SteakHouseGridworld(OvercookedGridworld):
         obj_drop_key = obj_name + "_drop"
         if obj_drop_key not in events_infos:
             # TODO: add support for tomato event logging
-            if obj_name in ["meat", "hot_plate", "steak", "garnish"]:
+            if obj_name in ["meat", "washed_plate", "steak", "steak_dish",
+                            "garnish", "garnish_dish"]:
                 return
             raise ValueError("Unknown event {}".format(obj_drop_key))
 

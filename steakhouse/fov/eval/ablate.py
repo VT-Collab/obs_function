@@ -12,9 +12,9 @@ import sys, os, json, contextlib
 import numpy as np
 import torch
 sys.path.insert(0, "/Users/mishafu/Desktop/obs_function/steakhouse")
-from fov.robot.policy.baseline.env_wrapper import RobotAssistEnv
-from fov.robot.policy.baseline.policy import ActorCritic
-from fov.robot.policy.module.fov_module import FOVModule
+from steakhouse.fov.robot.policy.old.baseline.env_wrapper import RobotAssistEnv
+from steakhouse.fov.robot.policy.old.baseline.policy import ActorCritic
+from steakhouse.fov.robot.policy.old.module.fov_module import FOVModule
 
 DEV = open(os.devnull, "w")
 

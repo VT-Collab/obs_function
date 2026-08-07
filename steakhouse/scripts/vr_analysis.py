@@ -126,6 +126,11 @@ def kb_diff_measure(human_kb, world_kb):
     # print(diff_measure)
     return diff_measure, kb_diff, round(diff_count/len(human_kb)*100, 2), round(diff_total/diff_count, 2)
 
+# NOTE: this file deliberately keeps the OLD object names 'hot_plate' and
+# 'steak'. It parses the 33 recorded VR study logs under data/logs/vr_study_logs,
+# which were written before the rename and are historical data -- rewriting them
+# would corrupt the record. Everywhere else in the repo these are now
+# 'washed_plate' and 'steak_dish'.
 def obj_held_freq(robot_holding_log, human_holding_log):
     obj_held_freq_dict = {}
     obj_diff_dict = {}

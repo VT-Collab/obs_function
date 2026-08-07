@@ -136,6 +136,10 @@ Belief = namedtuple("Belief", ["value", "seen_at"])
 # tile is inside the vision cone.
 TERRAIN_KIND = {'P': 'pot', 'B': 'board', 'W': 'sink', 'M': 'meat',
                 'O': 'onion', 'D': 'dish', 'S': 'serve', 'X': 'counter'}
+# The ONLY terrain that blocks line of sight (see _clear_los). Deliberately NOT
+# in TERRAIN_KIND: a wall is not a station, so it is never a subtask target and
+# never gets a belief - it is only ever scenery that light cannot cross.
+WALL = '#'
 # How far the agent can resolve a tile at all. Bounds the per-step scan and
 # means the agent never reasons about the world beyond its own senses.
 SIGHT_RADIUS = 8
@@ -144,7 +148,7 @@ TURN_GAIN_THRESHOLD = 2
 
 COMMITTED = {"deliver", "dump_item", "pickup_meat", "pickup_onion", "pickup_plate",
              "drop_meat", "drop_onion", "drop_plate",
-             "pickup_steak", "pickup_garnish", "pickup_hot_plate"}
+             "pickup_steak", "pickup_garnish", "pickup_washed_plate"}
 
 # --- subtask-sampling policy constants ------------------------------------
 # The advancing subtasks that carry the sampling freedom - everything an empty-
@@ -152,18 +156,18 @@ COMMITTED = {"deliver", "dump_item", "pickup_meat", "pickup_onion", "pickup_plat
 # held-object drops are NOT here: those are forced, not chosen.
 SAMPLING_SUBTASKS = frozenset({
     "pickup_meat", "pickup_onion", "chop_onion",
-    "pickup_plate", "heat_hot_plate", "pickup_hot_plate",
+    "pickup_plate", "heat_washed_plate", "pickup_washed_plate",
 })
 # Preference score per advancing subtask - higher = a more sensible next move.
 # P(tau) proportional to exp(score / temperature) over the AVAILABLE set. The two
 # prep lines (start the steak / start the garnish) are EQUAL top priority:
 # starving the garnish deadlocks assembly. Assembling a ready order is highest.
 PRIORITY = {
-    "pickup_hot_plate": 5,   # ASSEMBLE a ready steak+garnish - finish the order
+    "pickup_washed_plate": 5,   # ASSEMBLE a ready steak+garnish - finish the order
     "pickup_meat": 4,        # start the steak   (critical-path prep)
     "pickup_onion": 4,       # start the garnish (critical-path prep, EQUAL to meat)
     "chop_onion": 4,         # finish an in-progress chop
-    "heat_hot_plate": 3,     # finish an in-progress wash
+    "heat_washed_plate": 3,     # finish an in-progress wash
     "pickup_plate": 3,       # start a plate washing
 }
 DEFAULT_TEMPERATURE = 0.5    # the default sampler temperature (see docstring)
@@ -176,7 +180,7 @@ DEFAULT_TEMPERATURE = 0.5    # the default sampler temperature (see docstring)
 # redundant. Map: teammate's SEEN held item -> the human fetch it makes redundant.
 # Used at BOTH selection (_weights soft down-weight) and commitment
 # (_robot_redundant abandon). NOT included: steak/dish (act on the human's OWN
-# held item, never redundant) and chop_onion / heat_hot_plate (progress an item
+# held item, never redundant) and chop_onion / heat_washed_plate (progress an item
 # already committed to the human's OWN station). All of it is FOV-gated (fires
 # only on beliefs[ROBOT], written only while the teammate is in the cone) and
 # SOFT - see the "caution learned the hard way" paragraph in the module docstring
@@ -185,7 +189,7 @@ ROBOT_HELD_FETCH = {
     "meat": "pickup_meat",
     "onion": "pickup_onion",
     "plate": "pickup_plate",
-    "hot_plate": "pickup_hot_plate",
+    "washed_plate": "pickup_washed_plate",
 }
 
 # Teammate POSITION channel (station-yield): the station the teammate is SEEN
@@ -201,7 +205,7 @@ ROBOT_HELD_FETCH = {
 STATION_TASKS = {
     "pot":   frozenset({"pickup_meat"}),
     "board": frozenset({"pickup_onion", "chop_onion"}),
-    "sink":  frozenset({"pickup_plate", "heat_hot_plate"}),
+    "sink":  frozenset({"pickup_plate", "heat_washed_plate"}),
 }
 
 # A fetch/drop that RAN TO COMPLETION only to find its destination station already
@@ -281,10 +285,18 @@ class LimitedVisionSteakHuman:
 
     #for occlusion only
     def _clear_los(self, p, loc):
-        """True iff the straight line p->loc crosses no non-floor tile (endpoints
+        """True iff the straight line p->loc crosses no WALL tile (endpoints
         excluded). Reads TRUE terrain: a physical wall blocks light whatever the
         agent knows - not cheating (the agent still never reads a hidden station
-        timer through a wall; it just cannot SEE past the wall)."""
+        timer through a wall; it just cannot SEE past the wall).
+
+        MISHA NEW CHANGE - only '#' occludes. This used to block on any non-floor
+        tile (`!= ' '`), which made every counter and every station a sight
+        barrier, so occlusion was a side effect of wherever the furniture
+        happened to sit. Counters and stations are now waist-high and see-through;
+        walls are the ONLY occluder, and exist purely to partition the FOV. That
+        makes occlusion a deliberate property of a layout instead of an accident
+        of its worktop plan."""
         x0, y0 = p; x1, y1 = loc
         dx = x1 - x0; dy = y1 - y0
         steps = max(abs(dx), abs(dy))
@@ -295,7 +307,7 @@ class LimitedVisionSteakHuman:
             cx = int(round(x0 + dx * i / steps)); cy = int(round(y0 + dy * i / steps))
             if (cx, cy) == (x0, y0) or (cx, cy) == (x1, y1):
                 continue
-            if mtx[cy][cx] != ' ':
+            if mtx[cy][cx] == WALL:
                 return False
         return True
 
@@ -461,6 +473,14 @@ class LimitedVisionSteakHuman:
                                # SEEN carrying (soft; renormalised, never zeroed)
 
     def observe(self, state):
+        """
+        Update beliefs about the world based on what is currently visible from current state. Beliefs
+        about stations decay after forget_horizon steps, so the human must look
+        at a station to keep its belief current. The teammate is treated as a
+        station: it is only perceived when it falls inside the cone, and its
+        memory decays on the same horizon. No privileged channel - if the human is
+        facing away, it simply does not know what its partner is carrying.
+        """
         # The teammate is part of the world, so it is perceived exactly like a
         # station: only when it falls inside the cone, and the memory of it
         # decays on the same horizon. No privileged channel - if the human is
@@ -525,7 +545,7 @@ class LimitedVisionSteakHuman:
 
             POT   name='steak'      state=('steak', n_items, cook_timer)  <- TUPLE
             BOARD name='garnish'    state=chop_timer                      <- int
-            SINK  name='hot_plate'  state=wash_timer                      <- int
+            SINK  name='washed_plate'  state=wash_timer                      <- int
 
         `is_cooking` / `is_ready` are None on all of them, so the original
         `"cooking" if obj.is_cooking else "ready"` always said "ready".
@@ -542,8 +562,8 @@ class LimitedVisionSteakHuman:
                 return "ready" if self.mdp.steak_ready_at_location(state, loc) else "cooking"
             if name in ("garnish", "onion"):
                 return "ready" if self.mdp.garnish_ready_at_location(state, loc) else "chopping"
-            if name in ("hot_plate", "dish", "plate"):
-                return "ready" if self.mdp.plate_hot_at_location(state, loc) else "washing"
+            if name in ("washed_plate", "dish", "plate"):
+                return "ready" if self.mdp.plate_washed_at_location(state, loc) else "washing"
         except Exception:
             pass
         if name == "steak":
@@ -552,7 +572,7 @@ class LimitedVisionSteakHuman:
         if name in ("garnish", "onion"):
             timer = st if isinstance(st, int) else 0
             return "ready" if timer >= self.chop_time else "chopping"
-        if name in ("hot_plate", "dish", "plate"):
+        if name in ("washed_plate", "dish", "plate"):
             timer = st if isinstance(st, int) else 0
             return "ready" if timer >= self.wash_time else "washing"
         return "occupied"
@@ -653,7 +673,7 @@ class LimitedVisionSteakHuman:
             return pot in ("empty", UNKNOWN)
         if subtask == "pickup_onion":
             return board in ("empty", UNKNOWN)
-        # Everything else (pickup_steak / pickup_garnish / pickup_hot_plate /
+        # Everything else (pickup_steak / pickup_garnish / pickup_washed_plate /
         # pickup_plate / deliver / dump_item) runs to completion: a station not
         # ready YET is a WAIT, not a redundancy, and arrival ends the errand (a
         # no-op INTERACT still re-decides next tick), so no deadlock and no
@@ -690,15 +710,15 @@ class LimitedVisionSteakHuman:
             return "deliver"
         if held == "plate":
             return "drop_plate" if self.believed("sink") in ("empty", UNKNOWN) else "dump_item"
-        if held == "hot_plate":
+        if held == "washed_plate":
             # If the pot is SEEN empty there is no steak coming and none can be
             # started with both hands full, so set the plate down and go cook
             # rather than looping check_pot forever holding it.
             if self.believed("pot") == "ready":
                 return "pickup_steak"
             return "dump_item" if self.believed("pot") == "empty" else "check_pot"
-        if held in ("steak", "dish_with_steak"):
-            # Symmetric to the hot_plate case: if the board is SEEN empty there is
+        if held in ("steak_dish", "dish_with_steak"):
+            # Symmetric to the washed_plate case: if the board is SEEN empty there is
             # no garnish coming and none can be chopped with a steak in hand, so
             # set the steak down and go make one rather than looping check_board
             # forever holding it (a residual deadlock when the garnish was taken
@@ -796,8 +816,8 @@ class LimitedVisionSteakHuman:
         if sink == "empty":
             c.append("pickup_plate")           # start a plate washing
         if sink == "washing":
-            c.append("heat_hot_plate")         # advance the wash
-        # ASSEMBLY (pickup_hot_plate -> pickup_steak -> pickup_garnish -> deliver)
+            c.append("heat_washed_plate")         # advance the wash
+        # ASSEMBLY (pickup_washed_plate -> pickup_steak -> pickup_garnish -> deliver)
         # is only offered once BOTH components are actually ready: garnish done
         # (board ready), plate washed (sink ready), and a steak ready/cooking.
         # Flexible ordering must STATE this dependency explicitly, else it can
@@ -805,7 +825,7 @@ class LimitedVisionSteakHuman:
         # hands). Grabbing EARLIER was tried and is worse - it just deadlocks a
         # different way.
         if sink == "ready" and board == "ready" and pot in ("ready", "cooking"):
-            c.append("pickup_hot_plate")
+            c.append("pickup_washed_plate")
         # STATION-YIELD (teammate-receptiveness, POSITION channel): drop the tasks
         # that use a station the teammate is SEEN standing at / facing, so the
         # human does not compete or collide for a station its partner is already
@@ -839,9 +859,9 @@ class LimitedVisionSteakHuman:
             return board in ("chopping", UNKNOWN)
         if subtask == "pickup_plate":
             return sink in ("empty", UNKNOWN)
-        if subtask == "heat_hot_plate":
+        if subtask == "heat_washed_plate":
             return sink in ("washing", UNKNOWN)
-        if subtask == "pickup_hot_plate":
+        if subtask == "pickup_washed_plate":
             return sink in ("ready", UNKNOWN) or (pot == "ready" and board == "ready")
         return True
 
@@ -1049,6 +1069,69 @@ class LimitedVisionSteakHuman:
 
     # -- acting -------------------------------------------------------------
 
+    def execute(self, state, subtask, explore_act=None):
+        """Turn a CHOSEN subtask into a concrete action. PURE: writes nothing on
+        self and consumes no RNG, so it is safe to call speculatively.
+
+        Returns (action, arrived, used_explore).
+          arrived       the errand completed this tick (action() resets the
+                        commitment on it)
+          used_explore  an exploration action was emitted, so the CALLER should
+                        bump n_explore. The counter lives outside on purpose -
+                        it is the one side effect this branch used to have, and
+                        keeping it here would make the method unusable for the
+                        speculative queries below.
+
+        MISHA NEW CHANGE - split out of action() unchanged so the FOV inference
+        (robot/policy/old/inference/bayes_fov_sampling.py) can ask "what action
+        would this agent emit if it were executing tau?" for many hypothetical
+        tau per tick. It cannot go through action() to ask: that samples from
+        _rng and writes _current / _sampled / t / subtask_log, which would both
+        desynchronise a shadow from the real trajectory and correlate its draws
+        with the real human's. The filter previously kept its own copy of this
+        logic, which worked but would silently drift the first time the routing
+        here changed; now there is one implementation.
+
+        No new information is reachable from here: routing uses only the agent's
+        OWN discovered stations and known_terrain, exactly as before.
+
+        `explore_act` is a pure optimisation. _explore_action() depends only on
+        (state, this agent's beliefs), so within a single tick it is the same for
+        every subtask; a caller evaluating many subtasks may compute it once and
+        pass it in. Leave it None and it is computed on demand, as action() does.
+        """
+        if subtask == "explore":
+            act = self._explore_action(state) if explore_act is None else explore_act
+            return act, False, True
+
+        # MISHA NEW CHANGE - movement is planned by the AGENT's own BFS over
+        # cells it has seen, not by planner.act()'s mlp.mp.get_plan(), which
+        # searches the full map. The planner is now used only to look up
+        # which station kind a subtask targets.
+        targets = [t for t in self.stations.get(
+            self.planner.target_kind(subtask), [])]
+        player = state.players[self.agent_index]
+        faced = (player.position[0] + player.orientation[0],
+                 player.position[1] + player.orientation[1])
+        if faced in targets:
+            return (Action.STAY if subtask.startswith("check_")
+                    else Action.INTERACT), True, False
+
+        step = self._bfs_step(state, targets, adjacent=True)
+        if step == "ARRIVED":
+            # standing beside it but facing elsewhere: turn to face it
+            tgt = min(targets, key=lambda g: abs(g[0] - player.position[0])
+                      + abs(g[1] - player.position[1]))
+            act = (tgt[0] - player.position[0], tgt[1] - player.position[1])
+            if act not in ((0, -1), (0, 1), (1, 0), (-1, 0)):
+                act = Action.STAY
+            return act, False, False
+        if step is None:
+            # no route through KNOWN floor - go look for one
+            act = self._explore_action(state) if explore_act is None else explore_act
+            return act, False, True
+        return step, False, False
+
     def action(self, state):
         self.observe(state)
 
@@ -1074,40 +1157,9 @@ class LimitedVisionSteakHuman:
                 self.n_abandoned += 1     # dropped: OBSERVED no longer useful
             subtask = self.decide(state)
 
-        if subtask == "explore":
-            act = self._explore_action(state)
-            arrived = False
+        act, arrived, used_explore = self.execute(state, subtask)
+        if used_explore:
             self.n_explore += 1
-        else:
-            # MISHA NEW CHANGE - movement is planned by the AGENT's own BFS over
-            # cells it has seen, not by planner.act()'s mlp.mp.get_plan(), which
-            # searches the full map. The planner is now used only to look up
-            # which station kind a subtask targets.
-            targets = [t for t in self.stations.get(
-                self.planner.target_kind(subtask), [])]
-            player = state.players[self.agent_index]
-            faced = (player.position[0] + player.orientation[0],
-                     player.position[1] + player.orientation[1])
-            if faced in targets:
-                act = Action.STAY if subtask.startswith("check_") else Action.INTERACT
-                arrived = True
-            else:
-                step = self._bfs_step(state, targets, adjacent=True)
-                if step == "ARRIVED":
-                    # standing beside it but facing elsewhere: turn to face it
-                    tgt = min(targets, key=lambda g: abs(g[0] - player.position[0])
-                              + abs(g[1] - player.position[1]))
-                    act = (tgt[0] - player.position[0], tgt[1] - player.position[1])
-                    if act not in ((0, -1), (0, 1), (1, 0), (-1, 0)):
-                        act = Action.STAY
-                    arrived = False
-                elif step is None:
-                    # no route through KNOWN floor - go look for one
-                    act = self._explore_action(state)
-                    self.n_explore += 1
-                    arrived = False
-                else:
-                    act, arrived = step, False
 
         if subtask.startswith("check_"):
             self.n_checks += 1

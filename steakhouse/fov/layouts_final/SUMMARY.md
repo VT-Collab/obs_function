@@ -68,10 +68,10 @@ renormalised — never zeroed) and abandons the matching FETCH:
 | meat | `pickup_meat` |
 | onion | `pickup_onion` |
 | plate | `pickup_plate` |
-| hot_plate | `pickup_hot_plate` |
+| washed_plate | `pickup_washed_plate` |
 
 It does **not** react to a held steak/dish (those act on the human's *own* item)
-nor to `chop_onion`/`heat_hot_plate` (progress on the human's *own* station).
+nor to `chop_onion`/`heat_washed_plate` (progress on the human's *own* station).
 
 *Channel 2 — station-yield (where it's standing).* When the human SEES the teammate
 standing at / facing a station (pot/board/sink), it **yields** the tasks that use

@@ -87,7 +87,7 @@ MAX_CONSEC_STUCK = 20
 #   StickySubtaskHumanModel    len=18-21   npos=11-14  subtasks: pickup_meat[, drop_meat]
 #   SteakLimitVisionHumanModel len=39-177  npos=15-44  subtasks: pickup_meat, pickup_onion,
 #                                                      drop_onion, chop_onion, pickup_plate,
-#                                                      drop_plate, pickup_hot_plate, ...
+#                                                      drop_plate, pickup_washed_plate, ...
 #
 # Committing to pickup_meat routes the human into a state its planner has no
 # motion goal for, it stalls, and the episode dies ~20 steps in having touched

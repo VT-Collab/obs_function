@@ -112,7 +112,7 @@ def audit(layout, fov, seed):
             "pickup_onion": "board", "drop_onion": "board", "chop_onion": "board",
             "check_board": "board", "pickup_garnish": "board",
             "pickup_plate": "sink", "drop_plate": "sink", "check_sink": "sink",
-            "heat_hot_plate": "sink", "pickup_hot_plate": "sink",
+            "heat_washed_plate": "sink", "pickup_washed_plate": "sink",
         }
         kind = SUB2STATION.get(sub)
         if kind:

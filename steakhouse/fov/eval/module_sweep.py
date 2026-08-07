@@ -5,10 +5,10 @@ import sys
 import numpy as np
 import torch
 sys.path.insert(0, "/Users/mishafu/Desktop/obs_function/steakhouse")
-from fov.robot.policy.baseline.env_wrapper import RobotAssistEnv
-from fov.robot.policy.baseline.policy import ActorCritic
-from fov.robot.policy.module.fov_module import FOVModule
-from fov.robot.policy.end_to_end.compare import run
+from steakhouse.fov.robot.policy.old.baseline.env_wrapper import RobotAssistEnv
+from steakhouse.fov.robot.policy.old.baseline.policy import ActorCritic
+from steakhouse.fov.robot.policy.old.module.fov_module import FOVModule
+from steakhouse.fov.robot.policy.old.end_to_end.compare import run
 
 layout = sys.argv[1]
 weights = sys.argv[2]

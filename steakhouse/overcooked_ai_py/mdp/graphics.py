@@ -29,6 +29,10 @@ TERRAIN_TO_IMG = {
     'M': os.path.join(ASSETS_DIR, TERRAIN_DIR, 'steaks.png'),
     'W': os.path.join(ASSETS_DIR, TERRAIN_DIR, 'sink.png'),
     'B': os.path.join(ASSETS_DIR, TERRAIN_DIR, 'board_knife.png'),
+    # '#' is a WALL: impassable like a counter, but nothing can be placed on it
+    # (resolve_interacts only branches on 'X'), and it is the ONLY terrain that
+    # blocks line of sight. Walls exist to partition the FOV.
+    '#': os.path.join(ASSETS_DIR, TERRAIN_DIR, 'wall.png'),
 }
 
 PLAYER_HAT_COLOR = {

@@ -29,10 +29,10 @@ SUBTASK_TARGETS = {
     "drop_onion": "board",
     "drop_plate": "sink",
     "chop_onion": "board",
-    "heat_hot_plate": "sink",
+    "heat_washed_plate": "sink",
     "pickup_steak": "pot",
     "pickup_garnish": "board",
-    "pickup_hot_plate": "sink",
+    "pickup_washed_plate": "sink",
     "deliver": "serve",
     # Somewhere legal to set an item down when its station is occupied.
     "dump_item": "counter",

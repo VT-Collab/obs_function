@@ -7,9 +7,9 @@ import sys, os, json, contextlib
 import numpy as np
 import torch
 sys.path.insert(0, os.environ.get("STEAK_ROOT", "/Users/mishafu/Desktop/obs_function/steakhouse"))
-from fov.robot.policy.baseline.env_wrapper import RobotAssistEnv
-from fov.robot.policy.baseline.policy import ActorCritic
-from fov.robot.policy.module.fov_module import FOVModule
+from steakhouse.fov.robot.policy.old.baseline.env_wrapper import RobotAssistEnv
+from steakhouse.fov.robot.policy.old.baseline.policy import ActorCritic
+from steakhouse.fov.robot.policy.old.module.fov_module import FOVModule
 
 DEV = open(os.devnull, "w")
 FOV_SETS = [[30], [60], [90], [120], [180], [360], [30, 360], [30, 60, 90, 120, 180, 360]]

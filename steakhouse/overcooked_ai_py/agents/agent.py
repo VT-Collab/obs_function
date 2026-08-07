@@ -669,7 +669,7 @@ class GreedySteakHumanModel(GreedyHumanModel):
 
             steak_nearly_ready = len(ready_soups) > 0 or len(cooking_soups) > 0
             other_has_dish = other_player.has_object() and other_player.get_object().name == 'dish'
-            other_has_hot_plate = other_player.has_object() and other_player.get_object().name == 'hot_plate'
+            other_has_washed_plate = other_player.has_object() and other_player.get_object().name == 'washed_plate'
             other_has_steak = other_player.has_object() and other_player.get_object().name == 'steak'
             other_has_meat = other_player.has_object() and other_player.get_object().name == 'meat'
             other_has_onion = other_player.has_object() and other_player.get_object().name == 'onion'
@@ -678,7 +678,7 @@ class GreedySteakHumanModel(GreedyHumanModel):
             garnish_ready = len(chopping_board_status['ready']) > 0
             chopping = len(chopping_board_status['full']) > 0
             board_empty = len(chopping_board_status['empty']) > 0
-            hot_plate_ready = len(sink_status['ready']) > 0
+            washed_plate_ready = len(sink_status['ready']) > 0
             rinsing = len(sink_status['full']) > 0
             sink_empty = len(sink_status['empty']) > 0
 
@@ -688,12 +688,12 @@ class GreedySteakHumanModel(GreedyHumanModel):
                 motion_goals += am.pickup_onion_actions(counter_objects)
             if chopping and not garnish_ready:
                 motion_goals += am.chop_onion_on_board_actions(state)
-            if not rinsing and not hot_plate_ready and not other_has_plate:
+            if not rinsing and not washed_plate_ready and not other_has_plate:
                 motion_goals += am.pickup_plate_actions(counter_objects, state)
-            if rinsing and not hot_plate_ready:
+            if rinsing and not washed_plate_ready:
                 motion_goals += am.heat_plate_in_sink_actions(state)
-            if garnish_ready and hot_plate_ready:
-                motion_goals += am.pickup_hot_plate_from_sink_actions(counter_objects,state)
+            if garnish_ready and washed_plate_ready:
+                motion_goals += am.pickup_washed_plate_from_sink_actions(counter_objects,state)
             
             if len(motion_goals) == 0:
                 next_order = None
@@ -718,8 +718,8 @@ class GreedySteakHumanModel(GreedyHumanModel):
             elif player_obj.name == "plate":
                 motion_goals = am.put_plate_in_sink_actions(counter_objects, state)
 
-            elif player_obj.name == 'hot_plate':
-                motion_goals = am.pickup_steak_with_hot_plate_actions(pot_states_dict, only_nearly_ready=True)
+            elif player_obj.name == 'washed_plate':
+                motion_goals = am.pickup_steak_with_washed_plate_actions(pot_states_dict, only_nearly_ready=True)
 
             elif player_obj.name == 'steak':
                 motion_goals = am.add_garnish_to_steak_actions(state)
@@ -1017,8 +1017,8 @@ class limitVisionHumanModel(GreedyHumanModel):
             elif player_obj.name == 'dish':
                 motion_goals = am.deliver_dish_actions()
 
-            elif player_obj.name == 'hot_plate':
-                motion_goals = am.pickup_steak_with_hot_plate_actions(pot_states_dict, only_nearly_ready=True)
+            elif player_obj.name == 'washed_plate':
+                motion_goals = am.pickup_steak_with_washed_plate_actions(pot_states_dict, only_nearly_ready=True)
 
             elif player_obj.name == 'soup':
                 motion_goals = am.deliver_soup_actions()
@@ -1194,7 +1194,7 @@ class SteakLimitVisionHumanModel(limitVisionHumanModel):
                     if obj.id in tmp_kb['chop_states']['full']:
                         tmp_kb['chop_states']['full'].remove(obj.id)
 
-        elif 'hot_plate' in obj.name:
+        elif 'washed_plate' in obj.name:
             wash_time = obj.state
             if obj.position in self.mlp.mdp.get_sink_locations():
                 if wash_time >= 0 and wash_time < self.mlp.mdp.wash_time:
@@ -1289,9 +1289,9 @@ class SteakLimitVisionHumanModel(limitVisionHumanModel):
                                 new_obj = state.all_objects_by_type['steak'][-1]
                             elif prev_track['other_player'][0].held_object.name == 'onion' and state.all_objects_by_type['garnish']:
                                 new_obj = state.all_objects_by_type['garnish'][-1]
-                            elif prev_track['other_player'][0].held_object.name == 'plate' and state.all_objects_by_type['hot_plate']:
-                                new_obj = state.all_objects_by_type['hot_plate'][-1]
-                            elif prev_track['other_player'][0].held_object.name == 'hot_plate' and state.all_objects_by_type['steak']:
+                            elif prev_track['other_player'][0].held_object.name == 'plate' and state.all_objects_by_type['washed_plate']:
+                                new_obj = state.all_objects_by_type['washed_plate'][-1]
+                            elif prev_track['other_player'][0].held_object.name == 'washed_plate' and state.all_objects_by_type['steak']:
                                 new_obj = state.all_objects_by_type['steak'][-1]
                             elif prev_track['other_player'][0].held_object.name == 'steak' and state.all_objects_by_type['dish']:
                                 new_obj = state.all_objects_by_type['dish'][-1]
@@ -1338,9 +1338,9 @@ class SteakLimitVisionHumanModel(limitVisionHumanModel):
                                 new_obj = state.all_objects_by_type['garnish'][-1]
                                 tmp_track['human_holding'] = [None, self.kb_update_delay]
                             elif obj.name == 'plate':
-                                new_obj = state.all_objects_by_type['hot_plate'][-1]
+                                new_obj = state.all_objects_by_type['washed_plate'][-1]
                                 tmp_track['human_holding'] = [None, self.kb_update_delay]
-                            elif obj.name == 'hot_plate':
+                            elif obj.name == 'washed_plate':
                                 new_obj = None
                                 for tmp_steak in state.all_objects_by_type['steak']:
                                     if self.in_bound(state, tmp_steak.position, vision_bound=self.vision_bound/2):
@@ -1507,14 +1507,14 @@ class SteakLimitVisionHumanModel(limitVisionHumanModel):
         garnish_ready = len(chopping_board_status['ready']) > 0
         chopping = len(chopping_board_status['full']) > 0
         board_empty = len(chopping_board_status['empty']) > 0
-        hot_plate_ready = (len(sink_status['ready']) > 0)# or (len(counter_objects['hot_plate']) > 0)
+        washed_plate_ready = (len(sink_status['ready']) > 0)# or (len(counter_objects['washed_plate']) > 0)
         rinsing = len(sink_status['full']) > 0
         sink_empty = len(sink_status['empty']) > 0
         motion_goals = []
         
         steak_nearly_ready = len(ready_steaks) > 0 or len(cooking_steaks) > 0# or len(counter_objects['steak']) > 0
         other_has_dish = other_player.has_object() and other_player.get_object().name == 'dish'
-        other_has_hot_plate = other_player.has_object() and other_player.get_object().name == 'hot_plate'
+        other_has_washed_plate = other_player.has_object() and other_player.get_object().name == 'washed_plate'
         other_has_steak = other_player.has_object() and other_player.get_object().name == 'steak'
         other_has_meat = other_player.has_object() and other_player.get_object().name == 'meat'
         other_has_onion = other_player.has_object() and other_player.get_object().name == 'onion'
@@ -1527,8 +1527,8 @@ class SteakLimitVisionHumanModel(limitVisionHumanModel):
                 motion_goals += am.pickup_onion_actions(counter_objects)#, knowledge_base=self.knowledge_base)
             elif chosen_subtask == 'pickup_plate':
                 motion_goals += am.pickup_plate_actions(counter_objects, state)#, knowledge_base=self.knowledge_base)
-            elif chosen_subtask == 'pickup_hot_plate':
-                motion_goals += am.pickup_hot_plate_from_sink_actions(counter_objects, state)#, knowledge_base=self.knowledge_base)
+            elif chosen_subtask == 'pickup_washed_plate':
+                motion_goals += am.pickup_washed_plate_from_sink_actions(counter_objects, state)#, knowledge_base=self.knowledge_base)
                 if len(motion_goals) == 0:
                     if other_has_plate:
                         motion_goals += self.mlp.mdp.get_sink_status(state)['full']
@@ -1536,7 +1536,7 @@ class SteakLimitVisionHumanModel(limitVisionHumanModel):
                             tmp_goal = self.mlp.mdp.get_sink_status(state)['empty']
                             motion_goals += self.go_to_closest_feature_or_counter_to_goal(self.mlp.motion_planner.motion_goals_for_pos[tmp_goal], tmp_goal)
             elif chosen_subtask == 'pickup_steak':
-                motion_goals = am.pickup_steak_with_hot_plate_actions(self.mlp.mdp.get_pot_states(state))#, only_nearly_ready=True, knowledge_base=self.knowledge_base)
+                motion_goals = am.pickup_steak_with_washed_plate_actions(self.mlp.mdp.get_pot_states(state))#, only_nearly_ready=True, knowledge_base=self.knowledge_base)
                 if len(motion_goals) == 0:
                     if other_has_meat:
                         motion_goals = self.mlp.mdp.get_pot_states(state)['steak']['cooking'] + self.mlp.mdp.get_pot_states(state)['steak']['partially_full']
@@ -1559,7 +1559,7 @@ class SteakLimitVisionHumanModel(limitVisionHumanModel):
                 motion_goals = am.put_plate_in_sink_actions(counter_objects, state)#, knowledge_base=self.knowledge_base)
             elif chosen_subtask == 'chop_onion':
                 motion_goals += am.chop_onion_on_board_actions(state)#, knowledge_base=self.knowledge_base)
-            elif chosen_subtask == 'heat_hot_plate':
+            elif chosen_subtask == 'heat_washed_plate':
                 motion_goals += am.heat_plate_in_sink_actions(state)#, knowledge_base=self.knowledge_base)
             elif chosen_subtask == 'deliver_dish':
                 motion_goals = am.deliver_dish_actions()
@@ -1573,30 +1573,30 @@ class SteakLimitVisionHumanModel(limitVisionHumanModel):
                 #     motion_goals = counter_objects['dish']
                 # elif garnish_ready and not other_has_steak and 'steak' in counter_objects.keys():
                 #     motion_goals += counter_objects['steak']
-                # elif steak_nearly_ready and not other_has_hot_plate and 'hot_plate' in counter_objects.keys():
-                #     motion_goals = counter_objects['hot_plate']
+                # elif steak_nearly_ready and not other_has_washed_plate and 'washed_plate' in counter_objects.keys():
+                #     motion_goals = counter_objects['washed_plate']
                 
                 if chopping and not garnish_ready and self.prev_chosen_subtask in ['drop_onion', 'chop_onion']:
                     motion_goals += am.chop_onion_on_board_actions(state, knowledge_base=self.knowledge_base)
                     chosen_subtask = 'chop_onion'
-                elif rinsing and not hot_plate_ready and self.prev_chosen_subtask in ['drop_plate', 'heat_hot_plate']:
+                elif rinsing and not washed_plate_ready and self.prev_chosen_subtask in ['drop_plate', 'heat_washed_plate']:
                     motion_goals += am.heat_plate_in_sink_actions(state, knowledge_base=self.knowledge_base)
-                    chosen_subtask = 'heat_hot_plate'
+                    chosen_subtask = 'heat_washed_plate'
                 elif not steak_nearly_ready and state.num_orders_remaining > 0 and not other_has_meat:
                     motion_goals += am.pickup_meat_actions(counter_objects, knowledge_base=self.knowledge_base)
                     chosen_subtask = 'pickup_meat'
                 elif not chopping and not garnish_ready and not other_has_onion:
                     motion_goals += am.pickup_onion_actions(counter_objects, knowledge_base=self.knowledge_base)
                     chosen_subtask = 'pickup_onion'
-                elif not rinsing and not hot_plate_ready and not other_has_plate:
+                elif not rinsing and not washed_plate_ready and not other_has_plate:
                     motion_goals += am.pickup_plate_actions(counter_objects, state, knowledge_base=self.knowledge_base)
                     chosen_subtask = 'pickup_plate'
-                elif (garnish_ready or chopping or other_has_onion) and hot_plate_ready and steak_nearly_ready:# and not (other_has_hot_plate):# or other_has_steak)
-                    motion_goals += am.pickup_hot_plate_from_sink_actions(counter_objects, state, knowledge_base=self.knowledge_base)
-                    chosen_subtask = 'pickup_hot_plate'
-                # elif (garnish_ready or other_has_onion) and steak_nearly_ready and other_has_plate and not (other_has_hot_plate or other_has_steak) and not hot_plate_ready:
-                #     motion_goals += am.pickup_hot_plate_from_sink_actions(counter_objects, state, knowledge_base=self.knowledge_base)
-                #     chosen_subtask = 'pickup_hot_plate'
+                elif (garnish_ready or chopping or other_has_onion) and washed_plate_ready and steak_nearly_ready:# and not (other_has_washed_plate):# or other_has_steak)
+                    motion_goals += am.pickup_washed_plate_from_sink_actions(counter_objects, state, knowledge_base=self.knowledge_base)
+                    chosen_subtask = 'pickup_washed_plate'
+                # elif (garnish_ready or other_has_onion) and steak_nearly_ready and other_has_plate and not (other_has_washed_plate or other_has_steak) and not washed_plate_ready:
+                #     motion_goals += am.pickup_washed_plate_from_sink_actions(counter_objects, state, knowledge_base=self.knowledge_base)
+                #     chosen_subtask = 'pickup_washed_plate'
                     if len(motion_goals) == 0:
                         if other_has_plate:
                             motion_goals += self.knowledge_base['sink_states']['full']
@@ -1617,10 +1617,10 @@ class SteakLimitVisionHumanModel(limitVisionHumanModel):
                     chosen_subtask = 'drop_meat'
                 elif player_obj.name == "plate":
                     motion_goals = am.put_plate_in_sink_actions(counter_objects, state, knowledge_base=self.knowledge_base)
-                    # if (hot_plate_ready or rinsing) and garnish_ready and (steak_nearly_ready):
+                    # if (washed_plate_ready or rinsing) and garnish_ready and (steak_nearly_ready):
                     chosen_subtask = 'drop_plate'
-                elif player_obj.name == 'hot_plate':
-                    motion_goals = am.pickup_steak_with_hot_plate_actions(pot_states_dict, only_nearly_ready=True, knowledge_base=self.knowledge_base)
+                elif player_obj.name == 'washed_plate':
+                    motion_goals = am.pickup_steak_with_washed_plate_actions(pot_states_dict, only_nearly_ready=True, knowledge_base=self.knowledge_base)
                     chosen_subtask = 'pickup_steak'
                     if len(motion_goals) == 0:
                         if other_has_meat:
