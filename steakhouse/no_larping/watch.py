@@ -125,7 +125,10 @@ from robot.methods import (METHOD_KEYS, listing,                    # noqa: E402
 
 
 class Watcher:
-    HEAD, FOOT, PAD, GAP = 62, 62, 12, 14
+    # FOOT fits the tallest footer at 16px a line: human, robot, the drawn-from
+    # distribution, the partner-intent guess and the cone posterior. Adding a
+    # sixth line means raising this or it renders off the bottom edge.
+    HEAD, FOOT, PAD, GAP = 62, 94, 12, 14
 
     def __init__(self, args):
         self.args = args

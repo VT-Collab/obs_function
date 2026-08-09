@@ -539,7 +539,10 @@ def _subtask_str(sub):
 # screens
 # ---------------------------------------------------------------------------
 class App:
-    HEAD, FOOT, PAD = 62, 82, 12
+    # FOOT fits the tallest footer at 16px a line: events, teammate recall,
+    # their sub-task, the distribution it was drawn from, the partner-intent
+    # guess and the cone posterior. A seventh line means raising this.
+    HEAD, FOOT, PAD = 62, 112, 12
     MIN_W = 980                       # the HUD lines must not get clipped
     # Tall enough for the whole method table at one line each. _draw_setup
     # asserts it still fits, so adding a method to robot/methods.py fails loudly

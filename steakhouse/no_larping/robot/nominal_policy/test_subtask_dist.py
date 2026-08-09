@@ -109,6 +109,38 @@ check("beta=8 -> ~90/10", 0.87 < p_near < 0.93,
       "same tier, 5 tiles apart -> %.3f / %.3f" % (p_near, 1 - p_near))
 
 # ---------------------------------------------------------------------------
+print("\nFAITHFUL -- argmax(pi) should be the baseline's own pick")
+from robot.nominal_policy.subtask_dist import within_tier_penalty     # noqa: E402
+for pol, floor in (("greedy", 0.99), ("solo", 0.99), ("handoff", 0.99)):
+    mdp2 = SteakHouseGridworld.from_layout_name("butchery")
+    env2 = OvercookedEnv.from_mdp(mdp2, horizon=400, info_level=0)
+    env2.reset()
+    hu = LimitedVisionHuman(mdp2, 30, agent_index=1, seed=0)
+    pb = BASELINES[pol](mdp2, agent_index=0, seed=0)
+    hit = tot = 0
+    for _ in range(400):
+        st = env2.state
+        rk = pb.rank_subtasks(st)
+        if rk:
+            m_ = st.players[0]
+            p_, o_ = tuple(m_.position), tuple(m_.orientation)
+            w_ = TruthView(mdp2, st).walkable | {p_}
+            pen_ = {t: within_tier_penalty(pb, st, t, w_, p_) for t in rk}
+            pp = subtask_pi(rk, p_, o_, w_, float("inf"), pen_)
+            if pp:
+                tot += 1
+                hit += (max(pp, key=pp.get) == rk[0])
+        aa, _ = pb.action(st)
+        hh, _ = hu.action(st)
+        if mdp2.is_terminal(env2.state):
+            break
+        env2.step((aa, hh))
+    rate = hit / float(max(tot, 1))
+    # Not 100%, and cannot be: the baselines are lexicographic and the value
+    # function deliberately is not. See within_tier_penalty's docstring.
+    check("argmax(pi) is %s's pick" % pol, rate >= floor,
+          "%.1f%% of %d ticks" % (100 * rate, tot))
+
 print("\nSTATIONARY -- sticky sampling must leave pi exactly stationary")
 pi = subtask_pi(mine, pos, orient, walk, beta=4.0)
 N = 300000
