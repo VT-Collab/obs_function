@@ -1,11 +1,17 @@
 """Two robot baselines. NEITHER models the human's field of view.
 
-Both see the full state (per the problem statement: the robot directly observes
-s), and both are deliberately blind to theta. They are the control condition: any
-gain a later FOV-aware policy shows has to be measured against these, so it is
-important that the ONLY thing they lack is the human's observation model.
+THETA-BLIND, and that is the entire specification. Both see the full state (per
+the problem statement, the robot directly observes s) and both are deliberately
+blind to theta: there is NO CONE ANYWHERE IN THIS FILE, not even an assumed one.
+Grep it - no visible_cells, no assumed_fov, no posterior, no line of sight. An
+earlier version broke ties in a corridor by guessing a 180 cone; that quietly
+made the control theta-AWARE, and it never fired anyway, because the split
+layouts leave the two agents no shared floor at all. These are the control
+condition: any gain a later FOV-aware policy shows is measured against them, so
+the ONLY thing they may lack is the human's observation model.
 
-    B1  SoloRobot      ignores the human entirely. Runs the recipe itself.
+    B1  SoloRobot      runs the recipe itself and never stages anything for the
+                       human. The floor: what the team gets with no cooperation.
     B2  HandoffRobot   does stage items on counters for the human, but picks the
                        counter by DISTANCE, having no idea what the human can see.
 
@@ -14,9 +20,24 @@ robot - put something where the human can pick it up - but chooses WHERE blindly
 The FOV-aware policy differs from it in exactly one decision, which is what makes
 the comparison clean.
 
+NO COLLISION HANDLING, HERE OR ANYWHERE IN THE PACKAGE. No yielding, no
+right-of-way, no unstuck counter, no sidestep, and the human is not treated as an
+obstacle - step_towards() plans straight through their tile. Every layout is two
+rooms joined only by pass-through counters, so the two agents share no floor and
+were measured adjacent on 0 of 4800 ticks. All of that machinery fired zero times
+and was deleted rather than kept as decoration.
+
+CONTENTION SURVIVES, AND IT IS NOT COLLISION HANDLING. What the two agents CAN
+share is a station embedded in the dividing wall, reachable from both rooms -
+they stand at it from opposite sides, and only one of them gets the job done.
+_BaseRobot demotes such a subtask within its tier when the human would arrive
+first. Measured: it fired 732 times, all of them on shared stations, which is
+exactly what "reachable from both rooms" predicts. It is a partner model, not a
+traffic rule, and it reads POSITION only - never the cone.
+
 Both expose rank_subtasks(state) -> [(tier, verb, cell), ...] best first, so the
-planned QMDP filter can take the top-k, roll each out to delivery, and re-order
-them without either baseline needing to change.
+QMDP filter in robot/filter/ can take the top-k, roll each out to delivery, and
+re-order them without either baseline needing to change.
 """
 import os
 import sys
@@ -28,7 +49,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(
 
 from overcooked_ai_py.mdp.actions import Action              # noqa: E402
 from common import geometry as geo                            # noqa: E402
-from common.tasks import legal_subtasks, TIER_NAME, T_STASH, COUNTER  # noqa: E402
+from common.tasks import legal_subtasks, TIER_NAME, T_STASH   # noqa: E402
 from common.views import TruthView                            # noqa: E402
 
 
@@ -47,8 +68,6 @@ class _BaseRobot:
         self._rng = random.Random(self.seed * 2)
         self.t = 0
         self.last_subtask = None
-        self._last_pos = None
-        self._stuck = 0
         self.log = []
 
     # -- ranking ------------------------------------------------------------
@@ -58,19 +77,33 @@ class _BaseRobot:
         me = state.players[self.agent_index]
         pos = tuple(me.position)
         held = me.held_object.name if me.held_object else None
-        # teammate's cell is not standable this tick -- see the human for why
+        # the human's cell, used ONLY as the start of their hypothetical walk in
+        # the contention test below. It is not removed from `walk`: nothing here
+        # routes around them, and on these layouts nothing needs to.
         other = tuple(state.players[self.other_index].position)
-        walk = (view.walkable | {pos}) - {other}
+        walk = view.walkable | {pos}
 
+        # CONTENTION: give up a station the human would reach first, because the
+        # job will be done by the time we arrive and we would have spent the walk
+        # for nothing. Demoted within the tier, never across it, so if it is the
+        # only thing in its tier we still do it.
+        #
+        # `hd` is measured over the whole walkable floor, which is what makes
+        # this self-limiting: the two rooms are disconnected, so the human's path
+        # to a robot-side station comes back None and the term cannot fire. It
+        # only ever bites on a station embedded in the divide - measured 732
+        # firings, all of them there.
+        #
+        # POSITION ONLY, NEVER THE CONE. This file is the theta-blind control, so
+        # it may model where the human IS and what they are DOING, but never what
+        # they can SEE. Note the asymmetry with the human's own contention check,
+        # which asks the same question of a BELIEVED position and therefore
+        # answers it worse the narrower the cone.
         scored = []
         for tier, verb, cell in legal_subtasks(view, held):
             d = geo.path_len(walk, pos, cell)
             if d is None:
                 continue
-            # CONTENTION: yield a station the human will reach first. The robot
-            # always knows where the human is (it observes s fully), so it is
-            # the one that can reliably do the yielding. This is coordination,
-            # NOT theta-modelling -- it uses position only, never the cone.
             hd = geo.path_len(walk | {other}, other, cell)
             contested = int(hd is not None and hd < d)
             scored.append((tier, self._bias(view, state, verb, cell) + contested,
@@ -84,41 +117,37 @@ class _BaseRobot:
 
     # -- acting -------------------------------------------------------------
     def action(self, state):
+        """One env action: hold the current subtask if it is still among the best,
+        then take one step of the walk towards it, or INTERACT on arrival.
+
+        There is nothing after the step. No right-of-way clause, no unstuck
+        counter, no sidestep - see the module docstring for why none of it can
+        fire on these layouts.
+        """
         ranked = self.rank_subtasks(state)
         if not ranked:
             self.t += 1
             return Action.STAY, {"subtask": None}
         tier, verb, cell = ranked[0]
+        # sticky within a tier -- same reason as the human's decide(): a pure
+        # argmax swaps between equally good targets as we walk. Cross-tier
+        # preemption is untouched.
+        if self.last_subtask is not None:
+            for t2, v2, c2 in ranked:
+                if t2 != tier:
+                    break
+                if (TIER_NAME[t2], v2, c2) == self.last_subtask:
+                    tier, verb, cell = t2, v2, c2
+                    break
         self.last_subtask = (TIER_NAME[tier], verb, cell)
 
         view = TruthView(self.mdp, state)
         me = state.players[self.agent_index]
         pos, orient = tuple(me.position), tuple(me.orientation)
-        other = tuple(state.players[self.other_index].position)
         walk = view.walkable | {pos}
-        move, arrived = geo.step_towards(walk, pos, orient, cell, {other})
+        move, arrived = geo.step_towards(walk, pos, orient, cell)
         act = Action.INTERACT if arrived else (move or Action.STAY)
 
-        # RIGHT OF WAY: the robot gives way. If our next step is into the human,
-        # or we failed to move last tick, dodge immediately rather than shoving.
-        # The human holds station, so one of us moving is enough to resolve it.
-        nxt = (pos[0] + act[0], pos[1] + act[1]) if isinstance(act, tuple) else None
-        # A move into a NON-walkable cell is a TURN, not a step: position is
-        # meant to stay the same. Counting that as "stuck" made the robot
-        # sidestep away every time it lined up on a station, so it could never
-        # complete the turn-then-interact that ends every single subtask.
-        really_moving = nxt is not None and nxt in walk
-        blocked_now = nxt == other
-        if act is not Action.INTERACT and really_moving and \
-                (blocked_now or pos == self._last_pos):
-            self._stuck += 1
-            if self._stuck >= 1:
-                act = geo.sidestep(walk, pos, {other, nxt}, self._rng) \
-                      or geo.sidestep(walk, pos, {other}, self._rng) or Action.STAY
-                self._stuck = 0
-        else:
-            self._stuck = 0
-        self._last_pos = pos
 
         self.t += 1
         self.log.append(self.last_subtask)
@@ -133,12 +162,15 @@ class _BaseRobot:
 
 
 class SoloRobot(_BaseRobot):
-    """B1. Plays as if alone in the kitchen.
+    """B1. Plays as if alone in the kitchen, with one exception.
 
-    Same ladder as the human, evaluated on ground truth. It never stages
-    anything for the teammate and never reacts to them - the human is just a
-    moving obstacle. This is the floor: whatever the team achieves here is what
-    you get with zero coordination.
+    Same ladder as the human, evaluated on ground truth. It never stages anything
+    for the teammate and never reads their intent. The exception is _BaseRobot's
+    contention demotion, which it inherits: on a station in the divide it will
+    step aside for a human who is closer. That is small but it is real
+    coordination, which is why GreedyRobot exists in its own module without it -
+    the difference between the two is the value of that one rule, and it is worth
+    having as a number rather than folded into the floor.
     """
     name = "solo"
 
@@ -196,4 +228,15 @@ class HandoffRobot(_BaseRobot):
         return [(T_STASH, "stash", c) for _, c in counters] + ranked
 
 
-BASELINES = {"solo": SoloRobot, "handoff": HandoffRobot}
+# The other two theta-blind controls live in their own modules because neither
+# may inherit _BaseRobot, for opposite reasons: greedy is DEFINED by not having
+# its contention demotion, and bayes replaces the whole ranking with a posterior
+# over allocations. Both are still theta-blind - the thing that would disqualify
+# a control is a cone, and neither has one. Imported here so BASELINES stays the
+# single registry the harnesses read.
+from robot.nominal_policy.greedy import GreedyRobot                    # noqa: E402
+from robot.nominal_policy.bayesian_delegation import \
+    BayesianDelegationRobot                                            # noqa: E402
+
+BASELINES = {"solo": SoloRobot, "handoff": HandoffRobot,
+             "greedy": GreedyRobot, "bayes": BayesianDelegationRobot}

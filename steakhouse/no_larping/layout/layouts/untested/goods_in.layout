@@ -1,0 +1,24 @@
+{
+    "grid":  """#######B#######P#########
+                O       XXX     XXXXXX  #
+                #   #####               #
+                #   #####               #
+                #           1           #
+                #                       #
+                #XXWX#   #XXXXXXXX#   #X#
+                #    X   X        X   X #
+                #    X   X        X   X #
+                #    #XXXM        #XXX# #
+                #           2           D
+                S    ####       ####    #
+                #    ####       ####    #
+                #                       #
+                ######O##########B#######""",
+    "start_order_list": ['steak', 'steak', 'steak'],
+    "cook_time": 15,
+    "delivery_reward": 20,
+    'num_items_for_steak': 1,
+    'chop_time': 5,
+    'wash_time': 5,
+    "rew_shaping_params": None
+}

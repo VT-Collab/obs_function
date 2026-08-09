@@ -4,7 +4,22 @@
       "Bash(timeout 900 ~/miniconda3/envs/steakhouse-ai/bin/python -m fov.robot.policy.new.official_baselines.SP.self_play --layout steak_side_2 --n_rollout_threads 4 --episode_length 60 --horizon 60 --num_env_steps 1440 --ppo_epoch 2 --num_mini_batch 4 --data_chunk_length 10 --save_dir /tmp/sp_chunk)",
       "Bash(cp /private/tmp/claude-501/-Users-mishafu-Desktop-obs-function/eba921b3-1ec8-4f76-aa67-06180adaba03/scratchpad/newsprites/*-steak_dish.png /private/tmp/claude-501/-Users-mishafu-Desktop-obs-function/eba921b3-1ec8-4f76-aa67-06180adaba03/scratchpad/newsprites/*-garnish_plate.png chefs/)",
       "Bash(SDL_VIDEODRIVER=dummy PYTHONPATH=. /Users/mishafu/miniconda3/envs/steakhouse-ai/bin/python -c ' *)",
-      "Bash(sort -t: -k2 -rn)"
+      "Bash(sort -t: -k2 -rn)",
+      "Bash(/Users/mishafu/miniconda3/envs/steakhouse-ai/bin/python -m py_compile common/views.py common/tasks.py human/limited_vision_human.py)",
+      "Bash(grep -n *)",
+      "Bash(/Users/mishafu/miniconda3/envs/steakhouse-ai/bin/python -m py_compile common/tasks.py)",
+      "Bash(/Users/mishafu/miniconda3/envs/steakhouse-ai/bin/python -m py_compile human/limited_vision_human.py)",
+      "Bash(/Users/mishafu/miniconda3/envs/steakhouse-ai/bin/python -c ' *)",
+      "Bash(python3 -c \"import overcooked_ai_py, sys; print\\(overcooked_ai_py.__file__\\)\")",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 /private/tmp/claude-501/-Users-mishafu-Desktop-obs-function/4c5478d9-065b-4b72-ba84-5ef4d147135f/scratchpad/probe.py)",
+      "Bash(echo \"--- exit: $? \\(no matches = none\\) ---\")",
+      "Bash(SDL_VIDEODRIVER=dummy PYTHONPATH=/Users/mishafu/Desktop/obs_function/steakhouse:/Users/mishafu/Desktop/obs_function/steakhouse/no_larping /Users/mishafu/miniconda3/envs/lunarppo/bin/python /private/tmp/claude-501/-Users-mishafu-Desktop-obs-function/500bc4dc-3158-4acf-8fa6-832fbf405b76/scratchpad/det_check.py)",
+      "Bash(SDL_VIDEODRIVER=dummy PYTHONPATH=/Users/mishafu/Desktop/obs_function/steakhouse:/Users/mishafu/Desktop/obs_function/steakhouse/no_larping /Users/mishafu/miniconda3/envs/lunarppo/bin/python test_subtask_dist.py)",
+      "Bash(SDL_VIDEODRIVER=dummy PYTHONPATH=/Users/mishafu/Desktop/obs_function/steakhouse:/Users/mishafu/Desktop/obs_function/steakhouse/no_larping /Users/mishafu/miniconda3/envs/lunarppo/bin/python -c ' *)"
+    ],
+    "additionalDirectories": [
+      "/Users/mishafu/Desktop/obs_function/steakhouse/no_larping/human"
     ]
   }
 }

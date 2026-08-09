@@ -1,15 +1,22 @@
-"""
-Render every steak layout in no_larping/layouts at once, tiled in one window.
+"""Render every layout in no_larping/layout/layouts at once, tiled in one window.
 
-    python play.py                # all layouts, auto grid
-    python play.py --cols 6       # force 6 columns
+    python display_all.py                # all layouts, auto grid
+    python display_all.py --cols 6       # force 6 columns
 
 Keys:  q / ESC / close window  ->  quit
+
+For LOOKING at a whole generated suite in one go, which is how you notice that a
+divide came out ragged or that a bench swallowed a station. gen_layouts.py
+--show prints the same thing as ascii, and --audit gives you the numbers.
 
 How it works: SteakHouseGridworld.render() normally calls pygame.display.set_mode()
 itself and caches the window as mdp.viewer. Pre-assigning mdp.viewer to our own
 off-screen Surface makes it draw there instead, so each kitchen can be scaled down
-and blitted into a tile.
+and blitted into a tile -- otherwise every layout would fight over the one window.
+
+A layout that will not load is SKIPPED with a printed reason rather than killing
+the run: this is the tool you reach for when something is wrong with the suite,
+so it has to survive a broken member of it.
 """
 import argparse
 import math

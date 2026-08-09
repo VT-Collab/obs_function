@@ -102,7 +102,7 @@ def adjacent_standing_cells(walkable, target):
             if (target[0] + dx, target[1] + dy) in walkable]
 
 
-def step_towards(walkable, pos, orient, target, blocked=frozenset()):
+def step_towards(walkable, pos, orient, target):
     """One action that makes progress towards interacting with `target`.
 
     Returns (action, arrived). `arrived` means we are standing beside the target
@@ -110,11 +110,15 @@ def step_towards(walkable, pos, orient, target, blocked=frozenset()):
     A movement action into a non-walkable cell only turns the agent, which is
     exactly how we aim at a station.
 
-    `blocked` is the teammate's cell. Routing around them matters: a move into
-    an occupied cell silently fails in this env, so a path that runs through the
-    other agent livelocks - the agent re-plans the same blocked step forever. We
-    first try to route around them, and only fall back to planning through them
-    (they may well move) if there is no way round.
+    NOTHING HERE ROUTES AROUND A TEAMMATE, and there is no way to ask it to. The
+    old signature took a `blocked` cell and planned around it, because a move
+    into an occupied tile silently fails in this env and a path through the other
+    agent livelocks. That cannot happen in this suite: every layout is two rooms
+    joined only by pass-through counters, so the two agents share no floor and
+    were measured adjacent on 0 of 4800 ticks. The parameter, and the sidestep
+    helper that went with it, fired zero times and were deleted rather than left
+    as decoration. If a layout ever puts both cooks in one room again, this is
+    the function that has to grow the rule back.
     """
     facing = (pos[0] + orient[0], pos[1] + orient[1])
     if facing == target:
@@ -122,29 +126,11 @@ def step_towards(walkable, pos, orient, target, blocked=frozenset()):
     stands = adjacent_standing_cells(walkable, target)
     if pos in stands:                      # beside it but looking elsewhere: turn
         return (target[0] - pos[0], target[1] - pos[1]), False
-    for space in (walkable - set(blocked), walkable):
-        path = astar(space, pos, [s for s in stands if s in space])
-        if path is not None and len(path) >= 2:
-            nxt = path[1]
-            return (nxt[0] - pos[0], nxt[1] - pos[1]), False
+    path = astar(walkable, pos, stands)
+    if path is not None and len(path) >= 2:
+        nxt = path[1]
+        return (nxt[0] - pos[0], nxt[1] - pos[1]), False
     return None, False
-
-
-def sidestep(walkable, pos, blocked=frozenset(), rng=None):
-    """Any legal step off this cell, to break a mutual block.
-
-    The order is RANDOMISED per agent. With a deterministic order two agents in
-    the same corridor pick mirror-image escapes every tick and oscillate forever
-    instead of resolving - symmetry has to be broken by something.
-    """
-    dirs = list(DIRECTIONS)
-    if rng is not None:
-        rng.shuffle(dirs)
-    for dx, dy in dirs:
-        c = (pos[0] + dx, pos[1] + dy)
-        if c in walkable and c not in blocked:
-            return (dx, dy)
-    return None
 
 
 def path_len(walkable, pos, target):

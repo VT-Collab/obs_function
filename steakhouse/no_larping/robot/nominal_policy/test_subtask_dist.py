@@ -1,0 +1,230 @@
+"""Checks for subtask_dist.py. Run it directly:
+
+    PYTHONPATH=$STEAK_ROOT:$STEAK_ROOT/no_larping python test_subtask_dist.py
+
+Three of these carry the file's actual claims. The rest are guard rails.
+
+  IS_THE_VALUE_FUNCTION   pi at beta=1 is bayes's single-agent value, normalised
+                          -- not something similar to it, the same numbers.
+  STATIONARY              sticky sampling leaves pi exactly stationary, at every
+                          rho, so the occupancy distribution over ticks EQUALS
+                          the draw distribution.
+  HAS_POWER               the stationarity check FAILS on the two ways of
+                          getting it wrong. Without this the check above proves
+                          nothing -- a test that cannot fail is not evidence.
+"""
+import math
+import os
+import random
+import sys
+
+sys.path.insert(0, os.environ.get(
+    "STEAK_ROOT", "/Users/mishafu/Desktop/obs_function/steakhouse"))
+sys.path.insert(0, os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__)))))
+
+import overcooked_ai_py                                              # noqa: E402
+overcooked_ai_py.LAYOUTS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "layout", "layouts")
+
+from overcooked_ai_py.mdp.overcooked_env import OvercookedEnv        # noqa: E402
+from overcooked_ai_py.mdp.overcooked_mdp import SteakHouseGridworld  # noqa: E402
+from common.views import TruthView                                   # noqa: E402
+from human.limited_vision_human import LimitedVisionHuman            # noqa: E402
+from robot.nominal_policy.baselines import BASELINES                 # noqa: E402
+from robot.nominal_policy.bayesian_delegation import _Snapshot       # noqa: E402
+from robot.nominal_policy.subtask_dist import (                      # noqa: E402
+    StochasticSubtask, steps_to_finish, subtask_pi)
+
+FAILS = []
+
+
+def check(name, ok, detail=""):
+    print("  %-4s %-26s %s" % ("ok" if ok else "FAIL", name, detail))
+    if not ok:
+        FAILS.append(name)
+
+
+def advanced_state(layout="butchery", ticks=60, seed=0):
+    """A state some way into an episode, so hands are full and pi is non-trivial."""
+    mdp = SteakHouseGridworld.from_layout_name(layout)
+    env = OvercookedEnv.from_mdp(mdp, horizon=400, info_level=0)
+    env.reset()
+    human = LimitedVisionHuman(mdp, 30, agent_index=1, seed=seed)
+    bot = BASELINES["handoff"](mdp, agent_index=0, seed=seed)
+    for _ in range(ticks):
+        a, _ = bot.action(env.state)
+        h, _ = human.action(env.state)
+        if mdp.is_terminal(env.state):
+            break
+        env.step((a, h))
+    return mdp, env.state
+
+
+def maxdev(a, b):
+    keys = set(a) | set(b)
+    return max(abs(a.get(k, 0.0) - b.get(k, 0.0)) for k in keys)
+
+
+# ---------------------------------------------------------------------------
+print("\nIS_THE_VALUE_FUNCTION -- pi(beta=1) vs bayes's own value, same state")
+mdp, state = advanced_state()
+bayes = BASELINES["bayes"](mdp, agent_index=0, seed=0)
+snap = _Snapshot(bayes, state)
+me = state.players[0]
+pos, orient = tuple(me.position), tuple(me.orientation)
+walk = TruthView(mdp, state).walkable | {pos}
+
+# the step count must agree cell for cell, or nothing downstream can
+mine = [s for s in snap.mine if s is not None]
+step_mismatch = [(s, snap.steps[(0, s)], steps_to_finish(walk, pos, orient, s[2]))
+                 for s in mine
+                 if snap.steps[(0, s)] != steps_to_finish(walk, pos, orient, s[2])]
+check("steps_to_finish", not step_mismatch,
+      "%d/%d candidates agree with _Snapshot.steps" % (len(mine) - len(step_mismatch),
+                                                       len(mine)))
+
+ref = {s: bayes._snapshot(state)._worth(0, s) for s in mine}
+z = sum(ref.values())
+ref = {s: v / z for s, v in ref.items()}
+got = subtask_pi(mine, pos, orient, walk, beta=1.0)
+check("pi(beta=1) == value/Z", maxdev(ref, got) < 1e-12,
+      "max deviation %.2e over %d subtasks" % (maxdev(ref, got), len(mine)))
+
+# ---------------------------------------------------------------------------
+print("\nBETA -- endpoints and the calibration of the default")
+det = min(mine, key=lambda s: (s[0], snap.steps[(0, s)]))
+sharp = subtask_pi(mine, pos, orient, walk, beta=float("inf"))
+check("beta=inf is argmax", abs(sharp.get(det, 0.0) - 1.0) < 1e-12,
+      "puts %.4f on the deterministic policy's pick" % sharp.get(det, 0.0))
+flat = subtask_pi(mine, pos, orient, walk, beta=0.0)
+check("beta=0 is uniform", maxdev(flat, {s: 1.0 / len(mine) for s in mine}) < 1e-12)
+
+# two same-tier subtasks five tiles apart: does beta=8 really give ~90/10?
+GAMMA_ = 0.95
+r = GAMMA_ ** 5
+p_near = r ** 0 / (r ** 0 + r ** 8)          # value ratio raised to beta=8
+check("beta=8 -> ~90/10", 0.87 < p_near < 0.93,
+      "same tier, 5 tiles apart -> %.3f / %.3f" % (p_near, 1 - p_near))
+
+# ---------------------------------------------------------------------------
+print("\nSTATIONARY -- sticky sampling must leave pi exactly stationary")
+pi = subtask_pi(mine, pos, orient, walk, beta=4.0)
+N = 300000
+
+
+def occupancy(rho, redraw_excludes_current=False, per_subtask_rho=False, seed=1):
+    """Run the sticky chain and count TICKS each subtask is committed for."""
+    rng = random.Random(seed)
+    subs = list(pi)
+
+    def draw(exclude=None):
+        d = pi
+        if exclude is not None:
+            d = {s: p for s, p in pi.items() if s != exclude}
+            z = sum(d.values())
+            if z <= 0:
+                return exclude
+            d = {s: p / z for s, p in d.items()}
+        r, acc = rng.random(), 0.0
+        for s, p in d.items():
+            acc += p
+            if r < acc:
+                return s
+        return subs[-1]
+
+    held, counts = None, {s: 0 for s in subs}
+    for _ in range(N):
+        if held is None:
+            held = draw()
+        else:
+            # the broken variant: hold longer for subtasks further down pi
+            rr = rho * (0.5 + 0.5 * pi[held] / max(pi.values())) if per_subtask_rho else rho
+            if rng.random() > rr:
+                held = draw(exclude=held if redraw_excludes_current else None)
+        counts[held] += 1
+    return {s: c / float(N) for s, c in counts.items()}
+
+
+tol = 6.0 / math.sqrt(N)          # ~6 sigma on a Bernoulli at N draws
+for rho in (0.0, 0.5, 0.9, 0.99):
+    occ = occupancy(rho)
+    # a high rho means fewer independent draws, so widen the band accordingly
+    eff = tol / math.sqrt(max(1e-9, 1.0 - rho)) if rho < 1 else 1.0
+    check("occupancy == pi, rho=%.2f" % rho, maxdev(occ, pi) < eff,
+          "max deviation %.4f (tol %.4f)" % (maxdev(occ, pi), eff))
+
+print("\nHAS_POWER -- the check above must FAIL on the two ways to get it wrong")
+bad1 = occupancy(0.9, redraw_excludes_current=True)
+check("re-draw excluding current", maxdev(bad1, pi) > 10 * tol,
+      "deviates by %.4f -- correctly detected as wrong" % maxdev(bad1, pi))
+bad2 = occupancy(0.9, per_subtask_rho=True)
+check("per-subtask rho", maxdev(bad2, pi) > 10 * tol,
+      "deviates by %.4f -- correctly detected as wrong" % maxdev(bad2, pi))
+
+# ---------------------------------------------------------------------------
+print("\nWRAPPER -- forced re-draws, delegation, reproducibility")
+from robot.nominal_policy.subtask_dist import stochastic              # noqa: E402
+
+Cls = stochastic(BASELINES["handoff"], beta=8.0, rho=0.95)
+b1 = Cls(mdp, agent_index=0, seed=0)
+b2 = Cls(mdp, agent_index=0, seed=0)
+t1 = [b1.action(state)[1]["subtask"] for _ in range(30)]
+t2 = [b2.action(state)[1]["subtask"] for _ in range(30)]
+check("same seed reproduces", t1 == t2)
+
+# Seed divergence has to be measured where the draw is actually free. At the
+# defaults this state has 2 candidates and beta=8 makes pi near-degenerate, so
+# every seed picks the same thing and "different seed differs" would fail for a
+# reason that has nothing to do with seeding. Force a uniform draw every tick.
+Free = stochastic(BASELINES["handoff"], beta=0.0, rho=0.0)
+f1, f2 = Free(mdp, agent_index=0, seed=0), Free(mdp, agent_index=0, seed=7)
+u1 = [f1.action(state)[1]["subtask"] for _ in range(40)]
+u2 = [f2.action(state)[1]["subtask"] for _ in range(40)]
+check("different seed differs", u1 != u2,
+      "uniform draw over %d candidates, 40 ticks" % len(pi))
+check("rank_subtasks delegated",
+      b1.rank_subtasks(state) == BASELINES["handoff"](mdp, agent_index=0,
+                                                      seed=0).rank_subtasks(state))
+check("QMDP can rebuild it", isinstance(type(b1)(mdp, agent_index=0, seed=0), Cls))
+
+# rho=1 must never re-draw spontaneously; rho=0 must never hold
+never = stochastic(BASELINES["handoff"], rho=1.0)(mdp, agent_index=0, seed=0)
+whys = [never.action(state)[1]["subtask_redraw"] for _ in range(60)]
+check("rho=1 never spontaneous", "spontaneous" not in whys,
+      "%d forced, %d held" % (whys.count("forced"), whys.count("held")))
+always = stochastic(BASELINES["handoff"], rho=0.0)(mdp, agent_index=0, seed=0)
+whys0 = [always.action(state)[1]["subtask_redraw"] for _ in range(60)]
+check("rho=0 never holds", "held" not in whys0,
+      "%d forced, %d spontaneous" % (whys0.count("forced"), whys0.count("spontaneous")))
+
+# the info dict must carry a real distribution
+_, info = b1.action(state)
+d = info["subtask_dist"]
+check("subtask_dist sums to 1", abs(sum(d.values()) - 1.0) < 1e-9,
+      "%d entries" % len(d))
+
+# ---------------------------------------------------------------------------
+print("\nPOSTERIOR -- bayes draws from its own marginal, never IDLE")
+BayesPost = stochastic(BASELINES["bayes"], source="posterior")
+bp = BayesPost(mdp, agent_index=0, seed=0)
+human = LimitedVisionHuman(mdp, 30, agent_index=1, seed=0)
+ha, _ = human.action(state)
+for _ in range(5):
+    bp.update(state, ha)
+_, pinfo = bp.action(state)
+marg = {s: p for s, p in bp.inner._marginal(0).items() if s is not None and p > 0}
+zz = sum(marg.values())
+ref_post = {(s[0], s[1], s[2]): p / zz for s, p in marg.items()}
+got_post = {(k[0], k[1], k[2]) for k in pinfo["subtask_dist"]}
+check("dist is the marginal", abs(sum(pinfo["subtask_dist"].values()) - 1.0) < 1e-9,
+      "%d subtasks, IDLE excluded" % len(pinfo["subtask_dist"]))
+check("bayes readouts survive", "partner_subtask" in pinfo and "n_alloc" in pinfo,
+      "partner_p=%.3f" % pinfo["partner_p"])
+check("inner.last_action fed back", bp.inner.last_action is not None,
+      "otherwise bayes stops scoring its own action")
+
+print("\n%s  (%d failures)" % ("ALL PASS" if not FAILS else "FAILURES: " + ", ".join(FAILS),
+                               len(FAILS)))
+sys.exit(1 if FAILS else 0)
