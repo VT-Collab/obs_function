@@ -59,7 +59,7 @@ Domain adaptation, and where it departs from the paper
     makes inverse planning identifiable here at all. It is partner-free (it does
     not route around anybody), which is what "level 0" means.
   * THE LIKELIHOOD IS SOFT, not a match test. Read FOVPosterior in
-    robot/filter/qmdp_fov.py: it faces the identical problem -- one predicted
+    robot/filter/fov_posterior.py: it faces the identical problem -- one predicted
     action per hypothesis, compared against one observed action -- and its
     lesson is that a hard match lets a single modelling error zero a hypothesis
     forever, after which the posterior can never recover. Same two-part fix

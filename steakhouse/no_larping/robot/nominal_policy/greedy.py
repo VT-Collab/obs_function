@@ -100,9 +100,18 @@ class GreedyRobot:
         held = me.held_object.name if me.held_object else None
         walk = view.walkable | {pos}
 
+        # One memo, feeding legality AND ranking -- see the long note in
+        # _BaseRobot.rank_subtasks. Kept identical here on purpose: the whole
+        # value of this baseline is that it differs from solo in the `contested`
+        # term and in nothing else.
+        _field = geo.dist_field(walk, pos)
+
+        def dist(cell):
+            return geo.path_len_in(_field, walk, cell)
+
         scored = []
-        for tier, verb, cell in legal_subtasks(view, held):
-            d = geo.path_len(walk, pos, cell)
+        for tier, verb, cell in legal_subtasks(view, held, lambda c: dist(c) is not None):
+            d = dist(cell)
             if d is None:
                 continue
             scored.append((tier, d, cell, verb))

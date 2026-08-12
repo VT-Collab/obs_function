@@ -1,10 +1,18 @@
 """Phi(s) -- how far along the recipe is, in units of one delivered dish.
 
-The QMDP rollouts used to score on `sparse` alone, and sparse only ever fires on
-a delivery. Forty ticks is not enough to carry a raw onion all the way to the
+STATUS: `orders_remaining` below is live -- value_tail.py calls it, and it is
+the reason the tail is need-aware. `potential` itself is NOT currently wired
+into anything. It was the dense signal for a rollout that scored REWARD, and
+C_theta now scores TICKS instead: t_end + a bounded A* to the next dish, which
+is dense by construction because every tick of real progress takes the number
+down by about one. Kept because the reward-scoring question is not settled --
+if the tail is ever dropped for a longer pure simulation, that simulation needs
+this back. The reasoning below is why it has the shape it has.
+
+The rollouts once scored on `sparse` alone, and sparse only ever fires on a
+delivery. Forty ticks is not enough to carry a raw onion all the way to the
 pass, so every candidate came back 0.0, Q was flat, and the filter degenerated
-into whatever its tie-break happened to be. This is the dense signal that makes
-the rollouts discriminate.
+into whatever its tie-break happened to be.
 
 The env's own `shaped_reward` cannot do that job here. For the steak recipe the
 only shaped terms still live in overcooked_mdp are PLACEMENT_IN_POT_REW and
@@ -36,8 +44,8 @@ import sys
 
 sys.path.insert(0, os.environ.get(
     "STEAK_ROOT", "/Users/mishafu/Desktop/obs_function/steakhouse"))
-sys.path.insert(0, os.path.dirname(os.path.dirname(
-    os.path.dirname(os.path.abspath(__file__)))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.dirname(os.path.abspath(__file__))))))
 
 from common.tasks import POT, BOARD, SINK                          # noqa: E402
 

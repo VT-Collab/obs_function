@@ -1,17 +1,17 @@
 {
     "grid":  """####################O####
-                #XXXXX B ##########  ## #
+                #XXXXX B ##W#######  ## #
                 D      X                #
                 #X     X               ##
-                #X     X     #####     ##
+                #O     X     #####     ##
                 #X     #XX#  B####     ##
                 #X  1     X            ##
                 #         X     2      ##
                 #X        X            ##
-                #X     #XX#    M#####  ##
+                #X     #XX#    P#####  ##
                 #X     X       ######  ##
-                P  XXX X       ##       #
-                ######WX######S######M###""",
+                M  XXX X       ##       #
+                #######X######S######M###""",
     "start_order_list": ['steak', 'steak', 'steak'],
     "cook_time": 15,
     "delivery_reward": 20,

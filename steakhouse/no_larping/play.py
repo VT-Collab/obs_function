@@ -1,6 +1,6 @@
 """Playable keyboard interface for the no_larping steakhouse.
 
-    python play.py --layout divide --robot bayes
+    python play.py --layout divide --robot qmdp
     python play.py --list                        the layouts you can name
 
 You sit in ONE of the two seats and the code plays the other:
@@ -27,43 +27,83 @@ running estimate of their cone, inferred from nothing but the actions they take.
 
 The teammate policies live in robot/methods.py and the setup screen prints that
 registry verbatim -- `--list-robots` prints the same thing without opening a
-window. In order of how much of you each one models:
+window. It is a BASELINE COLUMN and ONE FILTER laid over it, nothing else.
 
-    greedy       nearest job first, every tick. No partner model of any kind.
-    solo         the same, plus it gives up a station in the dividing wall when
-                 you would get there first. That one rule is the difference.
-    handoff      solo plus staging: it leaves things on counters for you,
-                 choosing the counter nearest ITSELF -- it cannot see what you
-                 can.
-    bayes        infers WHICH JOB you are doing from your moves and takes
-                 another one. It models your intent, never your cone.
-    bayes-noip   bayes with inverse planning switched off, so the belief is the
-                 prior every tick. The control for the control.
-    qmdp         infers your CONE from your actions, then rolls handoff's
-                 options out against a simulated you.
-    qmdp-greedy  the same filter over greedy's shortlist,
-    qmdp-solo    over solo's,
-    qmdp-bayes   over bayes's. The filter only ever RE-RANKS what its baseline
-                 proposes, so which baseline it wraps is a real axis of the
-                 method rather than a detail -- see robot/filter/DESIGN.md.
-    qmdp-sparse  qmdp scored on deliveries alone, with the shaping off.
-    qmdp-map     qmdp against the single likeliest cone instead of the mixture.
+BASELINES, in order of how much of you each one models. All theta-blind: none
+reads your cone, so whatever an FOV-aware teammate beats them by is attributable
+to the cone and nothing else. Each adds a little to the one above.
 
-Everything above the qmdp block is a theta-blind control: whatever an FOV-aware
-policy beats them by is attributable to the cone and to nothing else.
+    greedy   nearest job first, every tick. No partner model of any kind.
+    solo     greedy plus a contention penalty: any candidate CELL your
+                   shortest path reaches sooner is demoted within its tier, so
+                   it is ceded only when that tier holds something else. It is
+                   not limited to stations -- it hits stash targets too, and
+                   mostly does, pushing its drops away from the counters you are
+                   near. Those counters are the only channel between the two
+                   rooms, so this can backfire: over 54 matched episodes it
+                   delivers fewer dishes than greedy (22 vs 35).
+    handoff  solo plus staging, and it is two changes rather than one.
+                   Holding something shareable with nothing better than a stash
+                   on offer, it prepends every reachable free counter as a
+                   target, ordered by distance from ITSELF -- it cannot see what
+                   you can. It also biases the `stash` verb within its tier,
+                   which leaves its own ranking unchanged but does shift the
+                   distribution the qmdp layer reads. The default teammate.
+    bayes     infers WHICH JOB you are doing from your moves and takes
+                   another one. It models your intent, never your cone.
+    bayes-noip    CONTROL: bayes with inverse planning switched off, so your
+                   observed actions are never folded in. Not frozen at the prior
+                   -- the belief is still carried and re-projected each tick --
+                   but EVIDENCE is the only knob that differs, so the gap
+                   between bayes-noip and bayes is what inference buys.
 
-All of the above pick the top of their own ranking. The last group DRAWS instead,
-from the distribution that policy really induces (robot/nominal_policy/
-subtask_dist.py). Given the sub-task the low-level action is a pure function for
-every policy here, so the sub-task choice is the only place variation can live:
+THE SAME FILTER OVER EACH ONE. qmdp-solo is not a cousin of qmdp; it is the same
+class over a different floor. There is one row per baseline because the layer
+degrades to the baseline it wraps, so that baseline is both its floor and the
+thing it has to beat. Each infers your CONE from your actions, then searches over
+HOW to do its baseline's job: which of the legal target cells, which first step,
+whether to wait a tick. Watch the "it DEVIATES" line in the footer -- most ticks
+it reads "follows its baseline" and the teammate simply IS that baseline; the
+ticks it flips are the ones where the rollouts found a placement you will
+actually see.
 
-    greedy-stoch   greedy, sub-task drawn from its own value prior
-    solo-stoch     solo, likewise
-    handoff-stoch  handoff, likewise
-    bayes-prior    bayes with inverse planning OFF, drawn from its prior
-    bayes-post     bayes drawn from its TRUE posterior P(tau_robot | history).
-                   bayes-prior and bayes-post differ in evidence alone, so the
-                   gap between them is what the inference actually buys.
+Press TAB and the "weighs" line shows the three sub-tasks your teammate was
+choosing between this tick, with `>` on the one it took. Every teammate prints
+it, but the number differs: a baseline shows the PROBABILITY it drew from -- so
+the marked row is often NOT the top one, which is the draw showing itself -- and
+a qmdp teammate shows estimated TICKS-TO-FINISH, lower better, where the marked
+row always is the top one.
+
+    qmdp           over handoff -- the headline configuration. Level on cells
+                   over the full grid (11/8/11) and down 2.2 dishes; see
+                   robot/filter/RESULTS.md.
+    qmdp-greedy    over greedy
+    qmdp-solo      over solo
+    qmdp-bayes     over bayes -- the ONLY pairing that beats its baseline on the
+                   full grid (17 win / 4 tie / 9 loss, +2.7 dishes), and the
+                   slowest, since bayes is slow per tick.
+    qmdp-base      PARITY CONTROL: the search cut down to its baseline's own
+                   candidate, so it is meant to play exactly like handoff.
+                   That parity is empirical, not guaranteed -- the must-keep rule
+                   can still admit a second pair while a commitment is held.
+    qmdp-fixed     THETA-BLIND CONTROL: the same rollouts with the cone frozen
+                   at 90. What freezes is the posterior's WEIGHTS, not the
+                   posterior -- it is still built, still fed your actions, still
+                   on the TAB readout, but every rollout simulates a 90-degree
+                   you. Whatever qmdp beats this by is what inferring your cone
+                   bought, rather than what rolling out bought.
+
+WHY EVERY BASELINE DRAWS. They take their sub-task from the distribution
+the policy really induces (robot/nominal_policy/subtask_dist.py) instead of
+taking the argmax, and that is not a flavour -- it is what makes the comparison
+mean anything. The filter consumes a DISTRIBUTION over sub-tasks; a
+deterministic policy has none, so it could only be fed a Boltzmann
+reconstruction of what a policy that never draws anything might have drawn, and
+then scored against a baseline that never held those preferences. Given the
+sub-task the low-level action is a pure function for every policy here, so the
+sub-task choice is the only place the variation lives. There is no deterministic
+variant to pick instead -- there used to be, and removing it is what made the
+comparison honest.
 
 --subtask-beta sets how sharp that distribution is and --subtask-rho how long a
 draw is held. rho does not change the distribution: the sticky kernel leaves it
@@ -108,7 +148,8 @@ Every flag
                       screen, which is where most people will pick it
     --fov DEG         the human seat's cone: 30, 60, 90, 180 or 360 (default 90).
                       Yours if you take that seat, the code's if you do not
-    --partner NAME    teammate policy when you play the human (default handoff).
+    --partner NAME    teammate policy when you play the human (default
+                      handoff).
                       --robot is accepted as a synonym so a command line copies
                       straight over from watch.py. The list is robot/methods.py
                       and nothing else -- both scripts read that one registry
@@ -177,7 +218,7 @@ from overcooked_ai_py.mdp.overcooked_mdp import SteakHouseGridworld  # noqa: E40
 from common import geometry as geo                                # noqa: E402
 from human.limited_vision_human import (LimitedVisionHuman,       # noqa: E402
                                         FORGET_HORIZON)
-from robot.filter.qmdp_fov import FOVPosterior                    # noqa: E402
+from robot.filter.core.fov_posterior import FOVPosterior              # noqa: E402
 from robot.methods import (GROUPS, HOTKEYS, METHOD_KEYS,          # noqa: E402
                            in_group, listing, make_robot, resolve)
 
@@ -540,14 +581,17 @@ def _subtask_str(sub):
 # ---------------------------------------------------------------------------
 class App:
     # FOOT fits the tallest footer at 16px a line: events, teammate recall,
-    # their sub-task, the distribution it was drawn from, the partner-intent
-    # guess and the cone posterior. A seventh line means raising this.
-    HEAD, FOOT, PAD = 62, 112, 12
+    # their sub-task, the top-3 it was weighing, the execution-layer line, the
+    # partner-intent guess and the cone posterior. An eighth line means raising
+    # this. WIDTH is the constraint that is easier to miss -- an over-long line
+    # is cut off at MIN_W with nothing on screen to say so, which is why
+    # subtask_dist.short_subtask exists and carries the measured numbers.
+    HEAD, FOOT, PAD = 62, 128, 12
     MIN_W = 980                       # the HUD lines must not get clipped
     # Tall enough for the whole method table at one line each. _draw_setup
     # asserts it still fits, so adding a method to robot/methods.py fails loudly
     # here rather than quietly rendering the last row off the bottom edge.
-    SETUP_SIZE = (1000, 800)
+    SETUP_SIZE = (1000, 880)
 
     def __init__(self, args):
         self.args = args
@@ -830,16 +874,45 @@ class App:
             return out
         out.append(("teammate subtask: %s" % _subtask_str(ep.mate_info.get("subtask")),
                     HOT))
-        if ep.mate_info.get("subtask_dist"):
-            # The distribution the sub-task was DRAWN from, and whether this tick
-            # held the previous draw or took a new one. Until the stochastic
-            # methods existed there was no such object to print.
-            d = ep.mate_info["subtask_dist"]
-            top = sorted(d.items(), key=lambda kv: -kv[1])[:3]
-            out.append(("it draws from  %s   [%s]"
-                        % ("  ".join("%s %s:%.2f" % (v, c, p)
-                                     for (_, v, c), p in top),
-                           ep.mate_info.get("subtask_redraw", "?")), ACCENT))
+        if ep.mate_info.get("top3"):
+            # THE THREE THINGS IT WAS CHOOSING BETWEEN, with the one it took
+            # marked `>`. Every teammate emits this, baseline and qmdp alike, so
+            # the line is comparable across the whole method table -- but the
+            # NUMBER is not the same quantity in the two cases and the label says
+            # which it is: a baseline shows the PROBABILITY it drew from, the
+            # filter shows its estimated TICKS-TO-FINISH, where lower wins.
+            #
+            # Watching a baseline, the marked row is often not the top one: that
+            # is the draw, and it is the fastest way to see a sampled policy
+            # behaving unlike a greedy one. Watching qmdp, the marked row IS the
+            # cheapest, and the interesting comparison is against the baseline's
+            # own ordering -- when they disagree, the layer has re-ranked the job.
+            kind = ep.mate_info.get("top3_kind", "p")
+            fmt = (lambda s: "%.2f" % s) if kind == "p" else (lambda s: "%.0ft" % s)
+            out.append(("weighs %-5s  %s%s"
+                        % ("p" if kind == "p" else "ticks",
+                           "   ".join("%s%s %s" % (">" if take else " ", lab, fmt(sc))
+                                      for lab, sc, take in ep.mate_info["top3"]),
+                           ("   [%s]" % ep.mate_info["subtask_redraw"]
+                            if ep.mate_info.get("subtask_redraw") else "")), ACCENT))
+        if "theta_entropy" in ep.mate_info:
+            # THE EXECUTION LAYER. Almost every tick this reads "follows
+            # baseline" and the teammate is exactly its nominal policy; the ticks
+            # where it flips to DEVIATES are the ones where the rollouts found a
+            # placement worth leaving that policy for. Sitting in the human seat
+            # with this on screen is the only way to watch it happen live.
+            dev = ep.mate_info.get("deviated")
+            plan = ep.mate_info.get("plan")
+            bits = ["it %-16s" % ("DEVIATES" if dev else "follows its baseline")]
+            if plan:
+                bits.append("plan %s@%s" % (plan[0], plan[1]))
+            if dev and ep.mate_info.get("gain") is not None:
+                bits.append("gain %+.2f" % ep.mate_info["gain"])
+            bits.append("H(theta) %.2f over %d cone%s"
+                        % (ep.mate_info["theta_entropy"],
+                           ep.mate_info.get("n_cones", 1),
+                           "" if ep.mate_info.get("n_cones", 1) == 1 else "s"))
+            out.append(("   ".join(bits), HOT if dev else DIM))
         if "partner_subtask" in ep.mate_info:
             # a teammate that infers YOUR INTENT rather than your cone
             out.append(("it thinks YOUR job is  %s   p=%.2f  H=%.2f bits"

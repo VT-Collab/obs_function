@@ -1,18 +1,18 @@
 {
-    "grid":  """#######D#######O#######
-                M       XXXXX         P
+    "grid":  """###################D###
+                M       XXXXX         #
+                #   ##         O#    X#
                 #   ##         ##    X#
-                #   ##         ##    X#
-                #   ##     1   ##    X#
+                #          1         X#
                 #                    X#
-                #XXWX#   #XXXXXXXX#   #
+                #XXXX#   #XXXXXXXX#   #
                 #    X   X        X   #
                 #    X   X        X   #
                 #    #XXX#        #BXX#
                 S          2          #
-                #    #D         P##   #
+                #    #W         PO#   #
                 #     #         ###   #
-                #                     #
+                #               #     #
                 #################D#####""",
     "start_order_list": ['steak', 'steak', 'steak'],
     "cook_time": 15,

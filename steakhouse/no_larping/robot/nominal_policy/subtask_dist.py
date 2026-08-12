@@ -104,6 +104,25 @@ RHO = 0.95        # hold ~20 ticks between spontaneous re-draws
 # distribution, not a second ranking rule.
 
 
+def short_subtask(sub):
+    """(tier, verb, cell) -> 'COMP plate_steak@12,5'. For one line of HUD.
+
+    Three of these plus a prefix has to fit inside play.py's MIN_W of 980 px at
+    couriernew 13, so 956 px of usable width. The full form -- tier spelled out,
+    `(12, 5)` with its space -- measures 1160 px for three entries and silently
+    runs off the right edge of the window, which is how a HUD line stops being
+    read rather than stops being true. This form measures 776 px on the widest
+    real line seen (three stash targets, which have the longest cells and a
+    redraw tag). Tier is cut to four characters because COMPLETE/COLLECT and
+    START/STASH are the pairs that nearly collide; all nine stay distinct, which
+    is asserted rather than assumed.
+
+    Lives here rather than in either harness so both print the same string.
+    """
+    tier, verb, cell = sub
+    return "%-4s %s@%d,%d" % (TIER_NAME[tier][:4], verb, cell[0], cell[1])
+
+
 def steps_to_finish(walk, pos, orient, cell):
     """Ticks to walk to `cell`, turn, and INTERACT. None if unreachable.
 
@@ -208,14 +227,88 @@ def subtask_pi(ranked, pos, orient, walk, beta=BETA, penalty=None):
     return {s: x / z for s, x in w.items()}
 
 
+def true_ranking(bot, state):
+    """The baseline's OWN ordering of its legal sub-tasks. Exact, not modelled.
+
+    `rank_subtasks` already returns them sorted by the policy's own key --
+    (tier, within-tier penalty, distance, cell, verb) -- so this IS the
+    preference order, with no Boltzmann in between. Anything that needs to know
+    what a baseline prefers should read this rather than reconstruct it: pi is a
+    DISTRIBUTION over that order for the stochastic wrappers, and a distribution
+    is the wrong object when the question is "what does it actually rank first".
+    """
+    return bot.rank_subtasks(state)
+
+
+def true_subtask(bot, state):
+    """The sub-task the baseline is ACTUALLY doing this tick. (tier_name, verb, cell).
+
+    NOT argmax of anything. `rank_subtasks` gives the ordering but the policies
+    then apply within-tier stickiness on top -- prefer what we were already doing
+    among equals -- so the ranking's head and the realised choice differ whenever
+    that fires. Only `action()` knows, because only `action()` applies it.
+
+    SIDE-EFFECTING, and unavoidably so: action() advances `t`, appends to `log`,
+    updates `last_subtask`, and for BayesianDelegationRobot sets `last_action`,
+    which its very next update() reads back as evidence about its own sub-task.
+    Call it ONCE per tick and reuse the answer -- calling it twice makes the
+    policy believe it acted twice.
+    """
+    _, info = bot.action(state)
+    return info.get("subtask")
+
+
+def true_pi(bot, state, ranked=None, pos=None, orient=None, walk=None):
+    """The baseline's own distribution over sub-tasks, where it HAS one.
+
+    Three different objects hide behind "the baseline's distribution":
+
+      bayes             a genuine posterior over allocations, updated by inverse
+                        planning from the human's observed actions. Read it, do
+                        not rebuild it -- `_marginal(0)` is the robot-side
+                        marginal and it is the real thing. Its keys ARE
+                        rank_subtasks's (tier, verb, cell) tuples, because
+                        `_candidates` builds the allocation set from the same
+                        `legal_subtasks` call: verified live on divide and
+                        chefs_table, 100% of the posterior mass lands on tuples
+                        the ranking also contains. On tick 0 the belief has not
+                        been built yet and this falls through to "modelled".
+      a drawing policy  the pi it actually sampled from, kept in `last_pi`.
+                        Every baseline in robot/methods.py is one of these.
+      plain ladder      no distribution exists; the policy is deterministic. The
+                        lifted Boltzmann in subtask_pi is a MODEL of it, faithful
+                        to 99.5-99.9% at the tuple level, and that is the honest
+                        description of what it is.
+
+    Returns (pi, source) so a caller can tell which of the three it got. A
+    caller that cannot tolerate a MODEL where the real thing exists should check
+    it: reconstructing what can be read exactly is how a wrapper's picture of its
+    own baseline drifts away from what the baseline does.
+    """
+    inner = getattr(bot, "inner", bot)
+    if getattr(bot, "last_pi", None):
+        return dict(bot.last_pi), "drawn"
+    if hasattr(inner, "_marginal"):
+        m = {k: v for k, v in inner._marginal(0).items() if k is not None}
+        if m:
+            z = sum(m.values()) or 1.0
+            return {k: v / z for k, v in m.items()}, "posterior"
+    if ranked is None:
+        ranked = bot.rank_subtasks(state)
+    return subtask_pi(ranked, pos, orient, walk), "modelled"
+
+
 class StochasticSubtask:
     """Any nominal policy, with argmax replaced by a sticky draw from pi.
 
     Wraps rather than subclasses, so baselines.py / greedy.py /
     bayesian_delegation.py are untouched and this can be removed without trace.
-    rank_subtasks is delegated verbatim, which is what keeps QMDPFilter able to
-    wrap one of these; update is delegated, which is what keeps bayes fed by the
-    Drivers fan-out in robot/methods.py.
+    rank_subtasks is delegated verbatim, which is what keeps QMDPFilter able
+    to wrap one of these; update is delegated, which is what keeps bayes fed by
+    the Drivers fan-out in robot/methods.py. `last_pi` is the distribution this
+    wrapper actually drew from, and true_pi above hands it back as "drawn" --
+    the one case where a wrapped baseline has a real distribution and nobody has
+    to model one.
     """
 
     def __init__(self, inner, beta=BETA, rho=RHO, seed=0, source="prior"):
@@ -353,6 +446,25 @@ class StochasticSubtask:
 
         return act, self._info(held, pi, ranked, why)
 
+    @staticmethod
+    def top3(pi, held):
+        """The three most likely sub-tasks, and which one was actually taken.
+
+        The shape is shared with QMDPFilter.action so the HUDs can render
+        either policy family with one code path: a list of (label, score, taken).
+        `score` here is a PROBABILITY -- info["top3_kind"] says so, because the
+        filter's version of this line is in TICKS and the two must not be read
+        as the same quantity.
+
+        `held` is the realised draw, not argmax(pi), and it is genuinely often
+        not the top row: that is the whole point of drawing, and seeing it on
+        screen is the fastest way to tell a sampled policy from a greedy one.
+        """
+        out = []
+        for s, p in sorted(pi.items(), key=lambda kv: (-kv[1], kv[0]))[:3]:
+            out.append((short_subtask(s), float(p), s == held))
+        return out
+
     def _info(self, held, pi, ranked, why):
         out = {"subtask": self.last_subtask,
                "subtask_dist": {(TIER_NAME[s[0]], s[1], s[2]): p
@@ -360,7 +472,9 @@ class StochasticSubtask:
                "subtask_p": pi.get(held, 0.0) if held else 0.0,
                "subtask_rank": (ranked.index(held) if held and ranked
                                 and held in ranked else None),
-               "subtask_redraw": why}
+               "subtask_redraw": why,
+               "top3": self.top3(pi, held),
+               "top3_kind": "p"}
         # bayes's own readouts, reproduced rather than taken from inner.action()
         # because we never call it. Same keys, so both HUDs light up unchanged.
         if hasattr(self.inner, "partner_map"):
@@ -374,11 +488,13 @@ class StochasticSubtask:
 def stochastic(cls, beta=BETA, rho=RHO, source="prior", **inner_kw):
     """A class with the standard (mdp, agent_index, seed) signature.
 
-    QMDPFilter._rollout rebuilds its baseline with
-    `type(self.baseline)(self.mdp, agent_index=...)`, so a wrapper whose __init__
-    takes (inner, ...) would crash the moment anything tried to roll one out.
-    Handing back a real class instead of a partial keeps that door open even
-    though robot/methods.py does not currently walk through it.
+    Anything that rebuilds a policy inside a search does it with
+    `type(bot)(mdp, agent_index=..., seed=...)`, so a wrapper whose __init__
+    takes (inner, ...) would crash the moment it was rolled out. Handing back a
+    real class instead of a partial keeps that door open. The deleted
+    subtask-level filter used it; QMDPFilter does not rebuild anything (its
+    head runs the robot's own controller to the first INTERACT and hands over to
+    the A* tail), so today this is a property nothing exercises.
     """
     class _Stochastic(StochasticSubtask):
         INNER = cls

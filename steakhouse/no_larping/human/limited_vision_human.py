@@ -302,12 +302,14 @@ class LimitedVisionHuman:
         # one memo, used both to decide legality and to rank it -- these were two
         # separate judgements before, which is exactly how the human ended up
         # committed to a station it could see and never reach.
-        _d = {}
+        # ONE BFS sweep, not one A* per candidate. legal_subtasks hands back tens
+        # of cells a tick and each used to pay for its own search; the grid is
+        # unit-cost and 4-connected so a single field from `pos` answers all of
+        # them with the same numbers (geometry.dist_field, checked exhaustively).
+        _field = geo.dist_field(walk, pos)
 
         def dist(cell):
-            if cell not in _d:
-                _d[cell] = geo.path_len(walk, pos, cell)
-            return _d[cell]
+            return geo.path_len_in(_field, walk, cell)
 
         # THREE ASKS, IN THIS ORDER, and each one only happens because the
         # previous came back empty.
@@ -332,6 +334,14 @@ class LimitedVisionHuman:
         # tightening for the duration of the decision, not the agent's default.
         self.view.optimistic = True
 
+        # the contention test walks from the BELIEVED robot position, so it is a
+        # second start and needs a second sweep -- built once here rather than
+        # once per candidate inside the loop.
+        _rwalk = _rfield = None
+        if self.react_to_robot and robot_pos is not None:
+            _rwalk = walk | {robot_pos}
+            _rfield = geo.dist_field(_rwalk, robot_pos)
+
         scored = []
         for tier, verb, cell in subtasks:
             d = dist(cell)
@@ -355,8 +365,8 @@ class LimitedVisionHuman:
             # is, so it contends more and coordinates worse. That is the effect
             # this package exists to measure, not a bug.
             contested = 0
-            if self.react_to_robot and robot_pos is not None:
-                rd = geo.path_len(walk | {robot_pos}, robot_pos, cell)
+            if _rfield is not None:
+                rd = geo.path_len_in(_rfield, _rwalk, cell)
                 contested = int(rd is not None and rd < d)
             scored.append((tier, redundant + contested, d, cell, verb))
         scored.sort()

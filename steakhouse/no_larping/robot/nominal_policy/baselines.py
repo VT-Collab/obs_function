@@ -36,8 +36,13 @@ exactly what "reachable from both rooms" predicts. It is a partner model, not a
 traffic rule, and it reads POSITION only - never the cone.
 
 Both expose rank_subtasks(state) -> [(tier, verb, cell), ...] best first, so the
-QMDP filter in robot/filter/ can take the top-k, roll each out to delivery, and
-re-order them without either baseline needing to change.
+QMDP layer in robot/filter/ can read what this policy prefers without either
+baseline needing to change. That layer does NOT simply re-order the list: it
+aggregates the tuples into (tier, verb) JOBS, hands each job its whole legal cell
+set, and searches over which cell and which first step -- precisely because the
+cell chosen in here is chosen theta-blind, by distance from the ROBOT. See
+robot/filter/DESIGN.md section 2 for the contract and
+robot/nominal_policy/subtask_dist.py for the three accessors it reads through.
 """
 import os
 import sys
@@ -72,7 +77,14 @@ class _BaseRobot:
 
     # -- ranking ------------------------------------------------------------
     def rank_subtasks(self, state):
-        """[(tier, verb, cell)] best first. The hook the QMDP filter will use."""
+        """[(tier, verb, cell)] best first. The hook the QMDP layer reads.
+
+        Sorted by this policy's OWN key, so it IS the preference order -- but it
+        is NOT what the policy does this tick, because action() applies
+        within-tier stickiness on top. subtask_dist.true_ranking wraps this and
+        true_subtask wraps action(); the two differ exactly when stickiness
+        fires.
+        """
         view = TruthView(self.mdp, state)
         me = state.players[self.agent_index]
         pos = tuple(me.position)
@@ -99,12 +111,34 @@ class _BaseRobot:
         # they can SEE. Note the asymmetry with the human's own contention check,
         # which asks the same question of a BELIEVED position and therefore
         # answers it worse the narrower the cone.
+        # ONE memo, used BOTH to decide legality and to rank it -- the same rule
+        # the human follows (limited_vision_human.rank). Filtering unreachable
+        # candidates out AFTERWARDS, as this did, is not the same thing and it
+        # broke two ways at once. legal_subtasks needs the predicate INSIDE it:
+        # actionable() is the termination rule that kills the stash-and-take-back
+        # loop (see tasks.py), and without `ok` it answers "could I ever use a
+        # dish?" with yes on a serve hatch across the divide that this robot can
+        # never reach. Measured on divide at fov 360: 115 stashes of a finished
+        # dish and 114 take_dish of it straight back, 0 delivered. The other half
+        # of the same bug: a non-empty legal list suppresses the stash fallback
+        # (tasks.py `if not out`), then every candidate is dropped here for being
+        # unreachable, the list comes back empty and the robot stands still --
+        # 98% of ticks on back_bar and pantry.
+        # ONE BFS sweep per start instead of one A* per candidate -- see
+        # geometry.dist_field. `other` is a second start, so it gets its own.
+        _field = geo.dist_field(walk, pos)
+        _owalk = walk | {other}
+        _ofield = geo.dist_field(_owalk, other)
+
+        def dist(cell):
+            return geo.path_len_in(_field, walk, cell)
+
         scored = []
-        for tier, verb, cell in legal_subtasks(view, held):
-            d = geo.path_len(walk, pos, cell)
+        for tier, verb, cell in legal_subtasks(view, held, lambda c: dist(c) is not None):
+            d = dist(cell)
             if d is None:
                 continue
-            hd = geo.path_len(walk | {other}, other, cell)
+            hd = geo.path_len_in(_ofield, _owalk, cell)
             contested = int(hd is not None and hd < d)
             scored.append((tier, self._bias(view, state, verb, cell) + contested,
                            d, cell, verb))
