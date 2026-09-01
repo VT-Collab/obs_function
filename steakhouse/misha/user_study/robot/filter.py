@@ -1,40 +1,48 @@
+"""Field-of-view filter laid over a nominal policy -- almost identical to
+robot/filter/core/my_fov_filter.py (untouched, read-only reference), so the
+robot can search for a plan that keeps it in the STUDY human's actual sight,
+not the ladder-argmax human my_fov_filter.py was built against.
+
+Pick the first action that keeps the robot in the human's cone, on a
+budget: Q(a) = min over plans whose FIRST action was 'a'. After taking
+action 'a' the robot is free to continue however is best. See
+my_fov_filter.py's own docstring for the full account of _score/_constraint
+/_forecast/action() -- none of that changed here.
+
+THE ONE SUBSTANTIVE CHANGE. my_fov_filter.py's _forecast() rolls a shadow
+human forward tick by tick to see whether the robot would be seen:
+`human = self.post.shadows[fov]`, one deterministic LimitedVisionHuman per
+cone. This file's `post` is a user_study/robot/fov_posterior.py
+SubtaskFOVPosterior, which reweights every currently-legal SUBTASK for every
+cone every tick rather than keeping one shadow at all -- see that file's own
+docstring for the design and why. _forecast() below rolls forward
+`self.post.best_shadow(fov)` instead -- a rollout-capable ApproximateHuman
+Model, seeded on demand from that fov's current highest-weight subtask and
+its observer's real belief, built for exactly this purpose (a planner needs
+something it can `.clone()` and step forward several ticks; the posterior's
+own per-tick reweighting never needs one). Everything else reads
+identically, because everything else -- baseline ranking, remaining(),
+true_pi(), the score/budget/incumbency machinery -- has nothing to do with
+which class the human shadow is; it only ever calls `.action(state)` and
+`.clone()` on it, and ApproximateHumanModel implements both the same way
+LimitedVisionHuman does.
 """
-Field-of-view filter laid over nominal policy
-
-    Input: baseline action probabilities
-           FoV information
-           Delta of human chnage of this action vs that action -? pairwose comparison
-    2 versions:
-        1. pure fov cap cost (do this first)
-        2. human model knowledge base gain
-
-
-DEBUG: 
-    Print for each action (up down stay left right) what is the score for each action
-
-
-CONSTRAINT of have to finish no longer than baseline + # of ticks
-of filter only allowed to modify for the first X steps of the entire trajectory
-
-or the trajectory is this line; we can only modify the shape of the trajectory this much
-
-or other constraint/limit of how much it allows to change 
-safety filter.
-no task knowledge
-
-
-
-
-"""
-
 import math
+import os
+import sys
 
-from overcooked_ai_py.mdp.actions import Action
-from common import geometry as geo
-from common.tasks import TIER_NAME
-from common.views import TruthView
-from robot.nominal_policy.baselines import true_pi
+HERE = os.path.dirname(os.path.abspath(__file__))              # .../user_study/robot
+USER_STUDY = os.path.dirname(HERE)                              # .../user_study
+MISHA = os.path.dirname(USER_STUDY)                              # .../misha
+sys.path.insert(0, os.environ.get(
+    "STEAK_ROOT", "/Users/mishafu/Desktop/obs_function/steakhouse"))
+sys.path.insert(0, MISHA)
 
+from overcooked_ai_py.mdp.actions import Action                # noqa: E402
+from common import geometry as geo                             # noqa: E402
+from common.tasks import TIER_NAME                             # noqa: E402
+from common.views import TruthView                             # noqa: E402
+from robot.nominal_policy.baselines import true_pi              # noqa: E402
 
 
 ALL_ACTIONS = [a for a in Action.ALL_ACTIONS]
@@ -57,19 +65,24 @@ class FOVFilter:
 
     Q(a) = min over plans whose FIRST action was 'a'. After taking action 'a'
     the robot is free to continue however is best
+
+    `posterior` must be a user_study/robot/fov_posterior.py SubtaskFOVPosterior
+    (or anything exposing the same `.p` / `.best_shadow(fov)` surface) -- NOT
+    robot/filter/core/fov_posterior.py's FOVPosterior, which has no
+    `best_shadow` to call at all.
     """
     def __init__(self, mdp,
                  baseline, #baseline type, solo/greedy/bayes
-                 posterior, #fov posterior
+                 posterior, #SubtaskFOVPosterior
                  certainty=0.9,
                  agent_index=0,
                  m =3, #number of DISTINCT JOBS from baseline (tier, verb) --
                        #every legal cell for each is kept, see _top_jobs
                  depth = 12,
                  weight_progress=1,   #_score: cost per tick of remaining distance
-                 weight_seen=-1,       #_score: reward per tick actually seen
-                 seen_bonus=-10,        #_score: extra reward for being seen at all
-                 budget_mult=1.5,     #_constraint: how much longer than the
+                 weight_seen=1,       #_score: reward per tick actually seen
+                 seen_bonus=20,        #_score: extra reward for being seen at all
+                 budget_mult=100,     #_constraint: how much longer than the
                                       #baseline's closest target a plan may take
                  stick=0.5,           #_forecast: incumbency bonus for the
                                       #committed cell, in score units
@@ -82,10 +95,9 @@ class FOVFilter:
         self.m = m
         self.depth = depth
 
-        #---- NEW: every _score/_constraint/_forecast knob lives here,
-        #     together, instead of scattered as local constants in _score and
-        #     a bare literal in _constraint -- one place to find and tune all
-        #     of them.
+        #---- every _score/_constraint/_forecast knob lives here, together,
+        #     instead of scattered as local constants -- one place to find
+        #     and tune all of them. Same as my_fov_filter.py.
         #----------------------------------------------------------------------
         self.weight_progress = weight_progress
         self.weight_seen = weight_seen
@@ -93,12 +105,12 @@ class FOVFilter:
         self.budget_mult = budget_mult
         self.stick = stick
 
-        #---- NEW: the target cell _forecast committed to last tick, if any --
+        #---- the target cell _forecast committed to last tick, if any --
         #     see the incumbency bonus in _forecast's candidate loop. Cleared
         #     on the certainty gate and on a _constraint override in action().
         #----------------------------------------------------------------------
         self.committed = None
-        #---- NEW: where the robot stood right before its last move toward
+        #---- where the robot stood right before its last move toward
         #     self.committed -- lets the incumbency bonus tell "a step
         #     forward" from "a step back to where I just was", so two
         #     adjacent, equally-good positions can't swap the bonus back
@@ -106,7 +118,7 @@ class FOVFilter:
         #----------------------------------------------------------------------
         self.committed_pos = None
 
-    #---- NEW: self.m distinct JOBS (tier, verb), not a flat top-m slice of
+    #---- self.m distinct JOBS (tier, verb), not a flat top-m slice of
     #     individual (tier, verb, cell) entries. A flat slice can silently
     #     split one job's own cells across ticks -- a cell demoted within
     #     its tier by the baseline's own within-tier ordering (contention,
@@ -150,7 +162,7 @@ class FOVFilter:
         return set(TruthView(self.mdp, state).walkable)
 
 
-   
+
     def _mask(self, ranked, pos, orient, walk):
         """
         Return the mask for top-m possible jobs
@@ -166,7 +178,7 @@ class FOVFilter:
             base = ALL_ACTIONS
         else:
             base = ALL_BUT_INTERACT
-        
+
         #cannot walk into a unmovable spot
         legal = []
         for a in base:
@@ -192,10 +204,6 @@ class FOVFilter:
         #how much for arrived, how much cost for never seen even once (but reme,ber this is every tick)
         #how much for each subsequent seen
         #what about repeats
-        #---- CHANGED: weights were local constants here (WEIGHT_PROGRESS,
-        #     WEIGHT_SEEN, BONUS_SEEN=0/1), now self.weight_progress/
-        #     self.weight_seen/self.seen_bonus set once in __init__.
-        #----------------------------------------------------------------------
         bonus = self.seen_bonus if seen_count > 0 else 0
         return (self.weight_progress * remaining
                 - self.weight_seen * seen_count
@@ -218,24 +226,14 @@ class FOVFilter:
         j[self.agent_index], j[self.other_index] = r_act, h_act
         return tuple(j)
 
-    #---- CHANGED: _constraint used to take (state, base_act, base_subtask,
-    #     plan_t) and decide the whole override itself, computing its own
-    #     "closest" via a local geo.path_len_in BFS. It's now just the one
-    #     budget number both call sites need: "is `remaining` within
-    #     self.budget_mult of `floor`?" -- `floor` is whatever the caller
-    #     considers the cheapest comparable option (see the two call
-    #     sites: _forecast passes the cheapest action for the SAME cell;
-    #     action() passes the baseline's own target). Neither caller
-    #     re-derives the arithmetic, they just supply the two numbers.
-    #----------------------------------------------------------------------
     def _constraint(self, remaining, floor):
         """
         True if `remaining` is no more than self.budget_mult times
         `floor` -- the one budget check the whole file is built on.
         """
         return floor is None or remaining <= floor * self.budget_mult
-    
-    
+
+
     def _forecast(self, state, ranked, pos, orient, walk, fov, base_act):
         """
         Try every masked first action; after that, walk a LIVE rollout toward
@@ -255,8 +253,13 @@ class FOVFilter:
         2. how much did counter and robot belief of human changed
         """
 
-        #fetch the fov human shadow
-        human = self.post.shadows[fov]
+        #---- CHANGED FROM my_fov_filter.py: `self.post` is a
+        #     SubtaskFOVPosterior (see that file), which reweights subtasks
+        #     directly rather than keeping a shadow at all -- best_shadow()
+        #     builds a rollout-capable one on demand from the fov's current
+        #     highest-weight subtask. See this file's module docstring.
+        #----------------------------------------------------------------------
+        human = self.post.best_shadow(fov)
 
         #calculate action mask
         action_mask = self._mask(ranked, pos, orient, walk)
@@ -264,10 +267,9 @@ class FOVFilter:
         #candidate target cells
         candidates = {cell for _, _, cell in ranked}
 
-        #---- NEW: which (tier, verb) job owns each candidate cell, and the
-        #     distinct jobs in ranked order -- lets the HUD group cells by
-        #     sub-task (the "top3"/"weighs" line) instead of just listing cells.
-        #----------------------------------------------------------------------
+        #which (tier, verb) job owns each candidate cell, and the distinct
+        #jobs in ranked order -- lets the HUD group cells by sub-task (the
+        #"top3"/"weighs" line) instead of just listing cells.
         owner = {}
         jobs = []
         for tier, verb, cell in ranked:
@@ -275,13 +277,11 @@ class FOVFilter:
             if (tier, verb) not in jobs:
                 jobs.append((tier, verb))
 
-        #---- NEW: how far each candidate was from done BEFORE this tick's
-        #     action -- ar-independent, computed once so the progress
-        #     check below (both for the tick's own first action and for
-        #     every rollout tick after it) has something to compare
-        #     against: a tick only earns its "seen" credit if remaining
-        #     actually went down, whatever action caused that.
-        #----------------------------------------------------------------------
+        #how far each candidate was from done BEFORE this tick's action --
+        #ar-independent, computed once so the progress check below (both for
+        #the tick's own first action and for every rollout tick after it)
+        #has something to compare against: a tick only earns its "seen"
+        #credit if remaining actually went down, whatever action caused that.
         before = {}
         for cell in candidates:
             tier, verb = owner.get(cell, (None, None))
@@ -289,21 +289,18 @@ class FOVFilter:
 
         #best action and score for it
         best_action, best_cell, best_score, best_t = None, None, float("inf"), None
-        #---- NEW: incumbency-adjusted comparison, tracked separately from
-        #     best_score so info/cands still show the real, unadjusted score --
-        #     only the SELECTION is biased toward the committed cell.
-        #----------------------------------------------------------------------
+        #incumbency-adjusted comparison, tracked separately from best_score
+        #so info/cands still show the real, unadjusted score -- only the
+        #SELECTION is biased toward the committed cell.
         best_adj = float("inf")
         scored = []            # every (ar, cell) plan actually scored -> `cands`
         qa = {}                 # ar -> best score seen for that first action -> `gain`.
                                  # diagnosis/HUD only -- nothing else reads qa.
-        #---- NEW: every (ar, cell, remaining, score) plan actually
-        #     scored. The winner used to be picked inline as each plan
-        #     was scored below, but the budget check further down needs
-        #     each cell's CHEAPEST remaining first -- which isn't known
-        #     until every action has been tried -- so picking a winner
-        #     has to wait for a second pass over this list instead.
-        #----------------------------------------------------------------------
+        #every (ar, cell, remaining, score) plan actually scored. The winner
+        #used to be picked inline as each plan was scored, but the budget
+        #check further down needs each cell's CHEAPEST remaining first --
+        #which isn't known until every action has been tried -- so picking a
+        #winner has to wait for a second pass over this list instead.
         combos = []
 
         #loop over every possible robot action at this timestep
@@ -320,26 +317,21 @@ class FOVFilter:
             pos1, orient1, _, _, seen1 = self.human_robot_position(state1, fov)
 
             for cell in candidates:
-                #---- CHANGED: was a local geo.path_len_in lookup against a
-                #     shared per-ar BFS (pure walk distance, blind to whether
-                #     a station needs more than one press). Now asks the
-                #     baseline for the whole walk-plus-work number for this
-                #     (tier, verb, cell) -- same call, right or wrong verb --
-                #     so a chop/wash mid-press correctly costs less than a
-                #     STAY next to it, without this file knowing what "chop"
-                #     or "wash" mean.
-                #----------------------------------------------------------------------
+                #asks the baseline for the whole walk-plus-work number for
+                #this (tier, verb, cell) -- same call, right or wrong verb --
+                #so a chop/wash mid-press correctly costs less than a STAY
+                #next to it, without this file knowing what "chop" or "wash"
+                #mean.
                 tier, verb = owner.get(cell, (None, None))
                 subtask = (tier, verb, cell)
                 remaining = self.baseline.remaining(state1, subtask)
                 if remaining is None:
                     continue
 
-                #---- NEW: only bank this tick's own sighting if `ar`
-                #     actually made progress on THIS subtask -- a STAY or
-                #     a step that goes nowhere earns nothing, whatever
-                #     action caused it. See `before`, computed above.
-                #----------------------------------------------------------------------
+                #only bank this tick's own sighting if `ar` actually made
+                #progress on THIS subtask -- a STAY or a step that goes
+                #nowhere earns nothing, whatever action caused it. See
+                #`before`, computed above.
                 b = before.get(cell)
                 seen = seen1 if (b is not None and remaining < b) else 0
                 prev_remaining = remaining
@@ -367,11 +359,9 @@ class FOVFilter:
                     cur_state, _, _, _ = self.mdp.get_state_transition(
                         cur_state, self._joint(mv or Action.STAY, ah))
                     rp, ro, _, _, saw = self.human_robot_position(cur_state, fov)
-                    #---- NEW: same progress check, per rollout tick -- a
-                    #     tick that doesn't push remaining below every
-                    #     prior tick in THIS rollout doesn't earn its
-                    #     sighting either.
-                    #----------------------------------------------------------------------
+                    #same progress check, per rollout tick -- a tick that
+                    #doesn't push remaining below every prior tick in THIS
+                    #rollout doesn't earn its sighting either.
                     cur_remaining = self.baseline.remaining(cur_state, subtask)
                     if cur_remaining is not None and cur_remaining < prev_remaining:
                         seen += saw
@@ -381,11 +371,10 @@ class FOVFilter:
                 #this is the fov score function called
                 score = self._score(remaining, seen)
 
-                #---- NEW: record this plan for the HUD's per-counter cost
-                #     table (`cands`). `av`/`tl` split so av+tl == score,
-                #     the invariant the HUD's "C = av + tl" readout assumes --
-                #     computed post-hoc so it holds for whatever _score does.
-                #----------------------------------------------------------------------
+                #record this plan for the HUD's per-counter cost table
+                #(`cands`). `av`/`tl` split so av+tl == score, the invariant
+                #the HUD's "C = av + tl" readout assumes -- computed post-hoc
+                #so it holds for whatever _score does.
                 verb = owner.get(cell, (None, "?"))[1]
                 window = 1 + ticks     # ticks actually examined for visibility
                 av = float(remaining)
@@ -393,53 +382,46 @@ class FOVFilter:
                 scored.append((verb, cell, remaining, round(score, 1),
                                seen, window, round(av, 1), round(tl, 1)))
                 qa[ar] = min(qa.get(ar, float("inf")), score)
-                #---- CHANGED: pos1 threaded through too -- the selection
-                #     pass below needs it to tell a step forward from a
-                #     step back to self.committed_pos.
-                #----------------------------------------------------------------------
+                #pos1 threaded through too -- the selection pass below needs
+                #it to tell a step forward from a step back to
+                #self.committed_pos.
                 combos.append((ar, cell, remaining, score, pos1))
 
-        #---- NEW: each cell's own floor -- the cheapest remaining ANY
-        #     action reached for it this tick. This is what the budget
-        #     check below measures every other action for that cell
-        #     against, so a plan can never win by taking longer than it
-        #     had to for the same destination, no matter how much extra
-        #     "seen" credit it racks up along the way.
-        #----------------------------------------------------------------------
+        #each cell's own floor -- the cheapest remaining ANY action reached
+        #for it this tick. This is what the budget check below measures
+        #every other action for that cell against, so a plan can never win
+        #by taking longer than it had to for the same destination, no
+        #matter how much extra "seen" credit it racks up along the way.
         floor = {}
         for ar, cell, remaining, score, pos1 in combos:
             if cell not in floor or remaining < floor[cell]:
                 floor[cell] = remaining
 
-        #---- CHANGED: the winner used to be picked inline, above, as each
-        #     plan was scored. Now it's picked here, in a second pass over
-        #     `combos`, so every plan for a cell is on the table before
-        #     any of them can be ruled out by that cell's own floor.
-        #----------------------------------------------------------------------
+        #the winner used to be picked inline, above, as each plan was
+        #scored. Now it's picked here, in a second pass over `combos`, so
+        #every plan for a cell is on the table before any of them can be
+        #ruled out by that cell's own floor.
         for ar, cell, remaining, score, pos1 in combos:
-            #---- NEW: skip a plan that costs more than self.budget_mult
-            #     times the cheapest plan available for the SAME cell --
-            #     the search may still trade distance for visibility
-            #     across DIFFERENT cells/jobs below, just not dawdle on
-            #     the way to whichever one it's already picked.
-            #----------------------------------------------------------------------
+            #skip a plan that costs more than self.budget_mult times the
+            #cheapest plan available for the SAME cell -- the search may
+            #still trade distance for visibility across DIFFERENT
+            #cells/jobs below, just not dawdle on the way to whichever one
+            #it's already picked.
             if not self._constraint(remaining, floor[cell]):
                 continue
 
-            #---- the committed cell gets a bonus for THIS comparison
-            #     only -- a challenger has to beat it by more than
-            #     self.stick to take over, so a tie/near-tie against
-            #     per-tick position noise doesn't cause a switch.
-            #---- CHANGED: the bonus is now withheld from a plan that
-            #     would walk straight back to self.committed_pos -- the
-            #     position the robot stood at right before its last move
-            #     toward this same cell. Without this, two adjacent,
-            #     equally-good positions each win the SAME bonus in turn
-            #     (mine at this spot, theirs at that spot) and the robot
-            #     ping-pongs between them forever; withholding it from
-            #     the reversing move breaks the tie toward whichever
-            #     option doesn't undo the last step.
-            #----------------------------------------------------------------------
+            #the committed cell gets a bonus for THIS comparison only -- a
+            #challenger has to beat it by more than self.stick to take
+            #over, so a tie/near-tie against per-tick position noise
+            #doesn't cause a switch.
+            #The bonus is withheld from a plan that would walk straight
+            #back to self.committed_pos -- the position the robot stood at
+            #right before its last move toward this same cell. Without
+            #this, two adjacent, equally-good positions each win the SAME
+            #bonus in turn (mine at this spot, theirs at that spot) and the
+            #robot ping-pongs between them forever; withholding it from the
+            #reversing move breaks the tie toward whichever option doesn't
+            #undo the last step.
             adj = score
             if cell == self.committed and pos1 != self.committed_pos:
                 adj = score - self.stick
@@ -447,11 +429,10 @@ class FOVFilter:
                 best_adj = adj
                 best_action, best_cell, best_score, best_t = ar, cell, score, remaining
 
-        #---- commit to whatever won, so next tick's comparison above
-        #     can give it the incumbency bonus. Also remember where we
-        #     stood AT THE START of this tick, so next tick's comparison
-        #     can tell a step forward from a step back to here.
-        #----------------------------------------------------------------------
+        #commit to whatever won, so next tick's comparison above can give
+        #it the incumbency bonus. Also remember where we stood AT THE START
+        #of this tick, so next tick's comparison can tell a step forward
+        #from a step back to here.
         self.committed_pos = pos if best_cell == self.committed else None
         self.committed = best_cell
 
@@ -492,12 +473,9 @@ class FOVFilter:
         #get the highest fov guess
         fov, pmap = self._map_cone()
 
-        #---- NEW: always-on HUD keys, set before any return so watch.py's
-        #     "H(theta)"/belief-bar lines and the exec line's headline always
-        #     have something to read, even on a gated tick. Mirrors
-        #     fov_filter.py's own pattern (info built at the top of action(),
-        #     result-only keys merged in only if _forecast actually ran).
-        #----------------------------------------------------------------------
+        #always-on HUD keys, set before any return so watch.py's
+        #"H(theta)"/belief-bar lines and the exec line's headline always
+        #have something to read, even on a gated tick.
         info = {
             "gated": False,
             "deviated": False,
@@ -511,20 +489,14 @@ class FOVFilter:
         #certainty about fov
         if fov is None or pmap < self.certainty:
             info["gated"] = True
-            #---- NEW: a stale commitment shouldn't survive a stretch where
-            #     the posterior wasn't trusted enough to search at all.
-            #----------------------------------------------------------------------
+            #a stale commitment shouldn't survive a stretch where the
+            #posterior wasn't trusted enough to search at all.
             self.committed = None
             self.committed_pos = None
             return base_act, info
 
 
         #ranked subtask, which is NOT the actual subtask baseline chose (due to stickiness)
-        #---- CHANGED: was self.baseline.rank_subtasks(state)[:self.m] -- a
-        #     flat cell-level slice, which is what let contention reorder
-        #     a job's own cells out of the candidate set entirely. See
-        #     _top_jobs.
-        #----------------------------------------------------------------------
         ranked = self._top_jobs(state)
         if not ranked:
             return base_act, info
@@ -543,14 +515,11 @@ class FOVFilter:
         act, forecast_info = self._forecast(state, ranked, pos, orient, walk, fov, base_act)
         info.update(forecast_info)
 
-        #---- CHANGED: _constraint is now just the (remaining, floor)
-        #     budget check -- see its own comment. This is the same safety
-        #     cap as before (don't let the search's chosen job cost more
-        #     than self.budget_mult times what the baseline's own target
-        #     would), so action() has to gather the two numbers itself:
-        #     the search's own plan_t, and how long the baseline's OWN
-        #     target would take from here.
-        #----------------------------------------------------------------------
+        #same safety cap as my_fov_filter.py (don't let the search's chosen
+        #job cost more than self.budget_mult times what the baseline's own
+        #target would), so action() has to gather the two numbers itself:
+        #the search's own plan_t, and how long the baseline's OWN target
+        #would take from here.
         base_subtask = base_info.get("subtask")
         plan_t = forecast_info.get("plan_t")
         closest = (self.baseline.remaining(state, base_subtask)
@@ -559,9 +528,8 @@ class FOVFilter:
         if (base_subtask is None or plan_t is None or closest is None
                 or not self._constraint(plan_t, closest)):
             info["constrained"] = True
-            #---- a rejected target shouldn't keep winning ties next tick
-            #     just because it's still "committed".
-            #----------------------------------------------------------------------
+            #a rejected target shouldn't keep winning ties next tick just
+            #because it's still "committed".
             self.committed = None
             self.committed_pos = None
             return base_act, info
