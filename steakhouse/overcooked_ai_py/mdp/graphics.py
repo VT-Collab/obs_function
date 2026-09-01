@@ -33,6 +33,11 @@ TERRAIN_TO_IMG = {
     # (resolve_interacts only branches on 'X'), and it is the ONLY terrain that
     # blocks line of sight. Walls exist to partition the FOV.
     '#': os.path.join(ASSETS_DIR, TERRAIN_DIR, 'wall.png'),
+    # 'G' is GLASS: impassable and non-interactable exactly like '#', but does
+    # NOT block line of sight -- los_clear (common/geometry.py) checks for '#'
+    # only, so glass is see-through by construction. Use it to partition floor
+    # without partitioning FOV.
+    'G': os.path.join(ASSETS_DIR, TERRAIN_DIR, 'glass.png'),
 }
 
 PLAYER_HAT_COLOR = {
