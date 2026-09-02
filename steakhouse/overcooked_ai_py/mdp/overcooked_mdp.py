@@ -2798,7 +2798,9 @@ class SteakHouseGridworld(OvercookedGridworld):
         certain height and width. grid[y][x] is the space at row y and column
         x. A space must be either 'X' (representing a counter), ' ' (an empty
         space), 'O' (onion supply), 'P' (pot), 'D' (dish supply), 'S' (serving
-        location), '1' (player 1) and '2' (player 2).
+        location), '1' (player 1) and '2' (player 2). 'G' is glass: impassable
+        and non-interactable like a wall, but -- unlike '#' -- does not block
+        line of sight (common/geometry.py's los_clear checks for '#' only).
         """
         height = len(grid)
         width = len(grid[0])
@@ -2808,7 +2810,7 @@ class SteakHouseGridworld(OvercookedGridworld):
 
         # Borders must not be free spaces
         def is_not_free(c):
-            return c in 'XOPDSTMWB#'
+            return c in 'XOPDSTMWB#G'
 
         for y in range(height):
             assert is_not_free(grid[y][0]), 'Left border must not be free'
@@ -2826,7 +2828,7 @@ class SteakHouseGridworld(OvercookedGridworld):
         assert layout_digits == list(range(1, num_players +
                                            1)), "Some players were missing"
 
-        assert all(c in 'XOPDSTWMB#123456789 '
+        assert all(c in 'XOPDSTWMB#G123456789 '
                    for c in all_elements), 'Invalid character in grid'
         assert all_elements.count('1') == 1, "'1' must be present exactly once"
         assert all_elements.count(

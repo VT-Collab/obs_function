@@ -9,11 +9,18 @@ wins ties. qmdp-base collapses the search to that single candidate, so its
 action trace has to equal its baseline's tick for tick -- and it has to do so
 while running the real rollout machinery, or it is checking nothing.
 
-The baseline it is checked against is `handoff`, NOT `handoff`, because
-that is the rung the filter actually wraps: the layer consumes a distribution
-over sub-tasks and only a -stoch wrapper has a real one. Parity therefore also
-proves the rng streams line up -- the wrapper draws from its own seeded stream,
-and the filter must not perturb it by calling action() twice or sampling again.
+The baseline it is checked against is `handoff` as that name means TODAY -- the
+policy that DRAWS its sub-task -- and not the deterministic policy the same word
+used to name. That is the rung the filter actually wraps: the layer consumes a
+distribution over sub-tasks and a policy that never draws does not have one.
+Parity therefore also proves the rng streams line up: the wrapper draws from its
+own seeded stream, and the filter must not perturb it by calling action() twice or
+sampling again.
+
+`qmdp-base` collapses via `only_base=True, waits=0`, which restricts the mask to
+the baseline's own realised cell and removes the arrival choice. That makes the
+collapse STRUCTURAL, where the filter this replaced could only make it empirical --
+its `pairs[:max(1, pair_k - 1)] + [must]` yielded two candidates at pair_k=1.
 """
 import os
 import sys
@@ -184,22 +191,43 @@ def test_C_ranks_the_greedy_step(layouts=("butchery", "divide"), fov=60, ticks=1
         wins = tot = 0
         for _ in range(ticks):
             s = env.state
-            ranked, cones = bot.baseline.rank_subtasks(s), bot._cones()
-            if ranked and cones:
+            ranked = bot.baseline.rank_subtasks(s)
+            fov_map, p_map = bot._map_cone()
+            if ranked and fov_map is not None:
                 me = s.players[0]
                 pos, orient = tuple(me.position), tuple(me.orientation)
-                walk = bot.walkable(s)
-                jobs, _ = bot._jobs(s, ranked, pos, orient, walk)
-                if jobs:
-                    v, cs = jobs[0]
-                    g = cs[0]
+                walk = bot.walkable(s) | {pos}
+                mask, jobs, owner = bot._mask(s, ranked, pos, orient, walk)
+                # The reference trajectory the human is forecast against, taken
+                # from the baseline's ALREADY-REALISED pick. Reading last_subtask
+                # rather than calling baseline.action() a second time is not a
+                # nicety: action() mutates the wrapper's rng and last_subtask, so
+                # a second call per tick would desynchronise the very policy this
+                # is measuring against. Same reason _forecast beelines.
+                pick = getattr(bot.baseline, "last_subtask", None)
+                ref = pick[2] if pick else None
+                if mask:
+                    g = next((c for c in mask), None)
+                    tgt = owner.get(g)
+                    # the first cell of the top-ranked job, to match what the
+                    # baseline would be walking towards
+                    for v in jobs[:1]:
+                        cs = [c for c in mask if owner.get(c) == v]
+                        if cs:
+                            g = sorted(cs)[0]
                     mv, arr = geo.step_towards(walk, pos, orient, g)
                     if mv and not arr and (-mv[0], -mv[1]) in moves:
                         opp = (-mv[0], -mv[1])
-                        cb = sum(w * bot._rollout(s, g, f, mv) for f, w in cones.items())
-                        co = sum(w * bot._rollout(s, g, f, opp) for f, w in cones.items())
-                        tot += 1
-                        wins += cb < co
+                        best, _ns, _nt, _cap, _sc = bot._search(
+                            s, fov_map, mask, ref, owner)
+                        ib = Action.ACTION_TO_INDEX[mv]
+                        io = Action.ACTION_TO_INDEX[opp]
+                        # Q(a) is a MIN over that action's own terminals, so an
+                        # action with no terminal inside `depth` has no Q at all
+                        # and the pair is simply not comparable on this tick.
+                        if ib in best and io in best:
+                            tot += 1
+                            wins += best[ib][0] < best[io][0]
             ra, _ = bot.action(s)
             ha, _ = h.action(s)
             nxt, _, done, _ = env.step((ra, ha))
@@ -217,6 +245,13 @@ if __name__ == "__main__":
     test_determinism()
     test_tail_prices_the_stash()
     test_C_ranks_the_greedy_step()
+    # PARITY RUNS LAST because it is the slowest and the most important. It was
+    # defined here and never called for several revisions, which is why
+    # RESULTS.md could say the parity control was unmeasured while a check for it
+    # sat in this file -- an unrun test is not a check.
+    test_parity(LAYOUTS, [90], [0])
+    print("\n%d failure(s)" % len(FAILS))
+    sys.exit(1 if FAILS else 0)
     test_parity(LAYOUTS, [30, 90, 360], [0, 1])
     print("\n%d failure(s)" % len(FAILS))
     for f in FAILS:

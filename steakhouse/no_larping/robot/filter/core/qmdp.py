@@ -1,8 +1,8 @@
 """QMDP over a MASKED DEVIATION SEARCH: no pairs, no cells, no budgets.
 
-The layer this sits beside (the superseded the superseded enumerating filter) enumerates candidates as
-triples `(v, g, a)` -- job, target cell, first action -- and pays for every one of
-them. Two truncations follow from that and both were doing damage:
+THE FILTER THIS REPLACED, now deleted, enumerated candidates as triples
+`(v, g, a)` -- job, target cell, first action -- and paid for every one of them.
+Two truncations followed from that and both were doing damage:
 
     cell_k = 6    cells offered per job, taken in the baseline's own order
     pair_k = 6    (v, g) pairs actually rolled out
@@ -34,8 +34,14 @@ searched instead is ACTIONS:
     every action sequence the mask allows, until the FIRST INTERACT,
     then the tail estimates everything after it
 
-`m` is the only bound left. `cell_k`, `pair_k` and `eps` are gone -- `eps` guarded
-the `(v, g)` switch and there is no `(v, g)` any more.
+`m` is the only candidate bound left: `cell_k` and `pair_k` are gone, and no
+identifier by either name survives in this file.
+
+`eps` DID go and then came back with a different job. It used to guard the
+`(v, g)` switch, and there is no `(v, g)` any more -- but removing it left the layer
+re-deciding from scratch every tick, which deadlocked (see GUARD (ii) below). It now
+guards the committed TARGET CELL instead. Same name, same units, different thing
+guarded; `eps_a` is still the action margin.
 
 WHY THIS IS NOT 5^25. Searching action SEQUENCES to the head cap would be
 6^25 ~ 10^19, and no latency budget makes that finite. It is not necessary. The
@@ -71,15 +77,28 @@ posterior makes sits inside the 1.6% the gate refuses to act on.
     rather than a performance estimate. `alpha = 0.9` is the only slack absorbing
     model error, and against a human whose ladder differs this number falls.
 
-WHAT IS KNOWINGLY LEFT OUT. There is no commitment and therefore no hysteresis.
-the superseded enumerating filter holds a committed `(v, g)` and forces it back into the candidate
-list whenever it drops out of the top-m, and its own comment records what happened
-without that: a third of all approaches abandoned mid-walk, chefs_table
-completions 47 -> 38, arrivals halved. The mask here is rebuilt every tick from a
-fresh top-m, so a cell being walked towards can leave the mask and the approach
-dies with it. `hold_target` re-admits the previous winning cell while it is still
-legal ANYWHERE in the full ranking; it defaults to False because it is not part of
-the design being tested, and it is the first thing to turn on if this thrashes.
+COMMITMENT IS ON THE TARGET CELL, NOT THE JOB. The mask is rebuilt every tick from
+a fresh top-m, so a cell being walked towards can leave the mask and the approach
+would die with it. The filter this replaced guarded against that by holding a
+committed `(v, g)` and forcing it back into the candidate list, and its own comment
+recorded what happened without it: a third of all approaches abandoned mid-walk,
+chefs_table completions 47 -> 38, arrivals halved.
+
+There is no `(v, g)` here to hold, so the same job is done by `eps` on the WINNING
+CELL -- guard (ii). It was not in the first version of this file and its absence was
+not a style choice, it was a deadlock: with nothing held, the layer re-decided from
+scratch each tick, and on a tick where its own plan missed `eps_a` by exactly the
+margin it emitted the baseline's STAY instead, which left the state unchanged, which
+reproduced the same tick forever. Traced on back_bar/qmdp-greedy. See `self.eps`.
+
+`hold_target` is a SEPARATE and weaker mechanism -- it re-admits the previous winning
+cell while it is still legal anywhere in the full ranking -- and it defaults to False
+because it is not part of the design being tested. It is the first thing to turn on
+if this thrashes.
+
+WHAT IS KNOWINGLY LEFT OUT: any term that values a SHARPER `p(theta)`. The robot
+never spends a tick to disambiguate a cone. That is a property of QMDP itself, not an
+omission here, and probing would be a separate ablatable bonus.
 """
 import collections
 import copy
@@ -236,7 +255,9 @@ class QMDPFilter:
         # human's `view.robot` and `seen_count` diverge with them. Measured state
         # counts on divide: 55 at depth 4, 355 at 6, 2281 at 8 -- about 2.5x per
         # level, so this is exponential in practice and no latency budget changes
-        # that. 6 is where the cost sits at a few hundred ms a tick.
+        # that. Around 6 is where a BRANCHING search's cost sits at a few hundred ms
+        # a tick -- which is why this file does not run one, and the rest of this
+        # comment is the argument that settled it.
         #
         # DO NOT RAISE THIS TO REACH THE FAR COUNTERS. It is the obvious thing to
         # want -- the farthest legal target measured over 655 ticks is 28 steps
@@ -257,12 +278,15 @@ class QMDPFilter:
         # So the trade is: branching buys route variation worth 0.8% and gives up
         # far cells entirely; enumeration gives up the 0.8% and reaches everything.
         # For THIS suite, where every dish crosses a counter chosen for visibility,
-        # enumeration is simply the better object and this file is the control that
-        # shows what the exhaustive version would have added.
+        # enumeration is simply the better object -- so THAT IS WHAT THIS FILE DOES,
+        # and `depth=30` is the enumerating bound: 30 ticks of simulation per
+        # (cell, arrival) candidate, enough to certify the 28-step worst case. The
+        # branching numbers above are kept because they are the measurement that
+        # ruled the alternative out, not because anything here runs that way.
         #
-        # Reaching no INTERACT within `depth` is therefore expected, not an error:
-        # roughly a third of ticks at depth 6. `no_reach` counts it so the bound is
-        # never silent.
+        # Reaching no INTERACT within `depth` is still possible and is not an error
+        # -- a cell can be unreachable in 30 ticks from where the robot stands.
+        # `no_reach` counts it so the bound is never silent.
         self.m, self.depth = m, depth
         # Arrival times scored per cell: `waits + 1` earliest. This is what
         # makes "same counter, two ticks later" a distinct plan instead of a
@@ -283,12 +307,6 @@ class QMDPFilter:
         self.eps_a = eps_a
         self.blind = blind
         self.certainty = certainty
-        # WHAT A COUNTER THE PARTNER CANNOT REACH COSTS. Not infinity, on purpose:
-        # on these layouts the robot often has no reachable-by-both counter at all
-        # for a given item, and an infinite cost would make every candidate equal
-        # and the ordering arbitrary. A large finite number keeps a failed handoff
-        # strictly worse than every real one, while still ranking the failures among
-        # themselves by t_end.
         # WHAT A FAILED HANDOFF COSTS. ONE number for both ways it fails -- the
         # partner never looks at the counter after the item lands there, or they
         # cannot stand beside it at all -- because within the horizon we have no
@@ -296,6 +314,12 @@ class QMDPFilter:
         # for this dish: the partner does not get this item. Ranking them against
         # each other would be ranking two guesses, so they are charged alike and
         # what separates counters INSIDE the failed class is just t_end.
+        #
+        # NOT INFINITY, on purpose: on these layouts the robot often has no
+        # reachable-by-both counter at all for a given item, and an infinite cost
+        # would make every candidate equal and the ordering arbitrary. A large finite
+        # number keeps a failed handoff strictly worse than every real one while
+        # still ranking the failures among themselves.
         #
         # IT MUST EXCEED THE LARGEST REAL PICKUP or the layer prefers a guess to a
         # measurement -- which it did at first, when `blind=8` made "nobody ever

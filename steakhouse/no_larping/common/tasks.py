@@ -39,6 +39,21 @@ TIER_NAME = {1: "DELIVER", 2: "COMPLETE", 3: "HALF", 4: "COLLECT", 5: "WORK",
 
 RAW = ("meat", "onion", "plate")
 
+#human model changes
+#add a "look for" that is targeted explore towards where you last saw robot for the thing you last saw 
+#robot carrying  -> not following but just like rational human would do this         
+#if robot carrying something higher level, you drop what you are doing and look for it () 
+
+#robot filter
+#MPC with cost of being seen/unseen -> treating human fov as deterministic 
+#but dont change it if its working -> keep qmdp as is for now
+
+#env
+#switch the meat and pot b/c now it is no longer robot giving to human but rather human looking for robot
+
+#baseline would be a fixed fov still
+
+#user study only with strongest baseline, eg. bayes
 
 def actionable(name, view, ok=None):
     """Is there anywhere I could TAKE this object that moves the order forward?
@@ -156,8 +171,33 @@ _ADVANCED_BY = {"meat": POT, "onion": BOARD, "plate": SINK}
 # another garnish. Stopping at the SOURCE lets the work in progress drain
 # instead of stranding it: an item already in hand or already on a station is
 # never suppressed, only the decision to start another one.
-_BECOMES = {"meat": ("steak_dish",), "onion": ("garnish",),
-            "plate": ("washed_plate",)}
+# COMPOSITES COUNT AS WHAT THEY CONTAIN. A garnish_dish is a garnish AND a plate,
+# and it is the one form those two can no longer be used as anything else -- so it is
+# the strongest evidence the work is done. Counting only the bare product missed it
+# entirely: two garnish_dishes on a counter stopped nothing, and the human went on
+# fetching onions, chopping them, fetching plates and washing them for a garnish and
+# a plate it was already holding. Measured on a constructed state, two garnish_dishes
+# blocked 0 verbs before this and 10 after -- the whole garnish chain and the whole
+# plate chain.
+#
+#     steak_dish    = a plate and a steak
+#     garnish_dish  = a plate and a garnish
+#     dish          = a plate, a steak and a garnish
+#
+# Both assembly orders exist, so garnish_dish is not a dead end and its plate is
+# genuinely spent: overcooked_mdp spec 1.c takes a garnish_dish to a pot holding a
+# ready steak and returns a dish, exactly as a steak_dish taken to a chopped board
+# does.
+_BECOMES = {"meat": ("steak_dish", "dish"),
+            "onion": ("garnish", "garnish_dish", "dish"),
+            "plate": ("washed_plate", "steak_dish", "garnish_dish", "dish")}
+
+# product -> the already-built things that contain one. Read by saturated().
+_CONTAINED_IN = {
+    "washed_plate": ("steak_dish", "garnish_dish", "dish"),
+    "garnish": ("garnish_dish", "dish"),
+    "steak_dish": ("dish",),
+}
 SURPLUS_AT = 2
 
 # The WHOLE chain that produces each thing, not just the dispenser at the front
@@ -176,6 +216,25 @@ _CHAIN_VERBS = {
                      "collect_garnish"},
     "steak_dish":   {"get_meat", "take_meat", "load_pot", "plate_steak"},
 }
+
+
+def _counts_composites(view):
+    """True for a BELIEF view, which is the only place this rule belongs.
+
+    Duck-typed rather than `isinstance(view, BeliefView)` because views.py imports
+    FROM this module -- importing it back would be circular. `forget_horizon` is the
+    right attribute to test on: it exists precisely because a belief can go stale,
+    which is the property that distinguishes the two view classes.
+
+    WHY THE RULE IS BELIEF-ONLY. Saturation is a claim about what the agent KNOWS is
+    already made, and the whole point of the belief view is that a narrow cone
+    under-counts the pile and over-produces -- the honest cost of not looking. A
+    TruthView caller (every baseline robot) is deliberately left on the old counting
+    so the robot side of every grid in RESULTS.md stays comparable across this
+    change; the measured arms differed in the human alone, and this keeps the code
+    matching what was measured.
+    """
+    return hasattr(view, "forget_horizon")
 
 
 def saturated(view, ok):
@@ -197,7 +256,11 @@ def saturated(view, ok):
     """
     blocked = set()
     for product, verbs in _CHAIN_VERBS.items():
-        if len([c for c in view.counters_holding(product) if ok(c)]) >= SURPLUS_AT:
+        n = len([c for c in view.counters_holding(product) if ok(c)])
+        if _counts_composites(view):
+            for comp in _CONTAINED_IN.get(product, ()):
+                n += len([c for c in view.counters_holding(comp) if ok(c)])
+        if n >= SURPLUS_AT:
             blocked |= verbs
     return blocked
 
@@ -336,8 +399,13 @@ def legal_subtasks(view, held, reachable=None, allow_stash=True):
         # within reach, the dispenser is simply not on the menu.
         if any(ok(c) for c in view.counters_holding(raw)):
             continue
+        # A TruthView caller sees only the bare product, a BeliefView caller counts
+        # the composites too -- see _counts_composites for why the two differ.
+        _becomes = _BECOMES.get(raw, ())
+        if not _counts_composites(view):
+            _becomes = _becomes[:1]
         surplus = sum(len([c for c in view.counters_holding(p) if ok(c)])
-                      for p in _BECOMES.get(raw, ()))
+                      for p in _becomes)
         if surplus >= SURPLUS_AT:
             continue                       # enough of these already made
         add(T_FETCH, "get_" + raw, view.stations(disp))

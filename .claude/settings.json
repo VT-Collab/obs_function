@@ -16,10 +16,19 @@
       "Bash(echo \"--- exit: $? \\(no matches = none\\) ---\")",
       "Bash(SDL_VIDEODRIVER=dummy PYTHONPATH=/Users/mishafu/Desktop/obs_function/steakhouse:/Users/mishafu/Desktop/obs_function/steakhouse/no_larping /Users/mishafu/miniconda3/envs/lunarppo/bin/python /private/tmp/claude-501/-Users-mishafu-Desktop-obs-function/500bc4dc-3158-4acf-8fa6-832fbf405b76/scratchpad/det_check.py)",
       "Bash(SDL_VIDEODRIVER=dummy PYTHONPATH=/Users/mishafu/Desktop/obs_function/steakhouse:/Users/mishafu/Desktop/obs_function/steakhouse/no_larping /Users/mishafu/miniconda3/envs/lunarppo/bin/python test_subtask_dist.py)",
-      "Bash(SDL_VIDEODRIVER=dummy PYTHONPATH=/Users/mishafu/Desktop/obs_function/steakhouse:/Users/mishafu/Desktop/obs_function/steakhouse/no_larping /Users/mishafu/miniconda3/envs/lunarppo/bin/python -c ' *)"
+      "Bash(SDL_VIDEODRIVER=dummy PYTHONPATH=/Users/mishafu/Desktop/obs_function/steakhouse:/Users/mishafu/Desktop/obs_function/steakhouse/no_larping /Users/mishafu/miniconda3/envs/lunarppo/bin/python -c ' *)",
+      "Bash(sed -n '2520,2570,p' /Users/mishafu/Desktop/obs_function/steakhouse/overcooked_ai_py/mdp/steakhouse_mdp.py)",
+      "Bash(awk 'NR==895,NR==930' /Users/mishafu/Desktop/obs_function/steakhouse/overcooked_ai_py/mdp/steakhouse_mdp.py)",
+      "Bash(python3 -m py_compile robot/nominal_policy/baselines.py robot/filter/core/my_fov_filter.py)",
+      "Bash(python3 /private/tmp/claude-501/-Users-mishafu-Desktop-obs-function/8e6f5f30-e59c-491b-8cd1-a8e1983d51f1/scratchpad/debug_fov.py divide 1.5 80)",
+      "Bash(python3 -c \"import numpy; print\\(numpy.__version__\\)\")",
+      "Bash(pyenv versions *)",
+      "Bash(/Users/mishafu/miniconda3/envs/steakhouse-ai/bin/python -c \"import numpy; print\\(numpy.__version__\\)\")",
+      "Bash(/Users/mishafu/miniconda3/envs/steakhouse-ai/bin/python /private/tmp/claude-501/-Users-mishafu-Desktop-obs-function/8e6f5f30-e59c-491b-8cd1-a8e1983d51f1/scratchpad/debug_fov.py divide 1.5 80)"
     ],
     "additionalDirectories": [
-      "/Users/mishafu/Desktop/obs_function/steakhouse/no_larping/human"
+      "/Users/mishafu/Desktop/obs_function/steakhouse/no_larping/human",
+      "/Users/mishafu/Desktop/obs_function/steakhouse/overcooked_ai_py/mdp"
     ]
   }
 }
