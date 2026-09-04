@@ -53,6 +53,7 @@ import numpy as np
 import pygame
 
 from highway_env.road.graphics import RoadGraphics, WorldSurface
+from highway_env.road.lane import StraightLane
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAYOUTS_DIR = os.path.join(HERE, "layouts")
@@ -69,6 +70,15 @@ ROBOT_COLOR = (255, 150, 60)
 ROBOT_PALETTE = [(255, 150, 60), (230, 70, 70), (190, 110, 255), (255, 215, 70), (90, 220, 150)]
 ROUTE_LATERAL_OFFSET = 0.6  # m, so two routes sharing one lane render as parallel tracks
 ROUTE_WIDTH = 3  # px
+ROUTE_START_COLOR = (60, 230, 90)  # green marker at a route's first point
+ROUTE_END_COLOR = (230, 60, 60)  # red marker at a route's last point
+ROUTE_MARKER_RADIUS = 7  # px
+BG_LANE_COLOR = (235, 210, 40)  # yellow overlay: every lane route_adjacent_lane_indexes() would hand to add_background_traffic as a spawn candidate
+ARROW_COLOR = (220, 220, 220)  # light, road-marking grey -- reads as part of the lane, not as a route/overlay color
+ARROW_LENGTH = 2.2  # m, tip to tail
+ARROW_WIDTH = 1.4  # m, tail spread
+ARROW_MIN_LANE_LENGTH = 4.0  # m -- skip arrows on lanes too short for one to read cleanly (tight turn-arc stubs)
+BG_LANE_WIDTH = 2  # px, thin so it overlays a lane's centerline without hiding the base line-type rendering underneath
 
 
 def layout_names():
@@ -103,18 +113,57 @@ def road_bounding_box(road):
     return min(xs), max(xs), min(ys), max(ys)
 
 
+def _lane_sample_points(lane):
+    """How many longitudinal samples to take along `lane` for drawing it as
+    a polyline: a straight lane is exactly itself with just its two
+    endpoints, but a curved lane (CircularLane, SineLane -- anything that
+    isn't dead straight) drawn as a polyline is only as smooth as its own
+    sample spacing, and a fixed "every 3m" (this file's own earlier
+    convention) is coarse enough to render as visible straight-line kinks
+    on this codebase's own tight turn curves (9-21m radius) -- confirmed
+    directly: highway_env's own base rendering doesn't draw these curves
+    at all (right/left turns are line_types=[NONE, NONE] by design, a real
+    turn lane isn't painted either), so draw_bg_lanes' and this function's
+    own polylines are the ONLY rendering of them, and coarse sampling was
+    the entire visible cause, not the underlying geometry (verified
+    directly: lane endpoints connect exactly, no gap, anywhere a turn
+    meets its own approach/exit). One sample every 3m is still fine for a
+    straight lane (it draws as a single segment either way), so only
+    curved lanes need the denser step."""
+    step = 3.0 if isinstance(lane, StraightLane) else 0.5
+    return max(2, int(lane.length / step))
+
+
 def route_polyline(road, route, lateral: float):
-    """World-space points tracing `route`. Two formats: a list of
-    (from, to, lane_id) lane indices to sample along, or -- for a layout with
-    no lane graph, like a raw imported scene -- a plain list of (x, y)
-    world points, used as-is (lateral offset doesn't apply, since there's no
-    lane to offset across)."""
+    """World-space points tracing `route`, offset `lateral` meters
+    perpendicular to the local direction of travel (the same +90-degree
+    "direction_lateral" convention StraightLane itself uses) so two routes
+    sharing the same underlying lanes -- e.g. HUMAN_ROUTE and ROBOT_ROUTE,
+    which typically enter a scene from different arms and then converge
+    onto one identical shared tail -- render as two visible parallel
+    tracks instead of one completely hiding the other. Two formats: a
+    list of (from, to, lane_id) lane indices to sample along (offset
+    directly via each lane's own position(lon, lateral)), or a plain list
+    of (x, y) world points -- e.g. HUMAN_ROUTE/ROBOT_ROUTE themselves, or
+    a layout with no lane graph -- offset using each point's own local
+    tangent (a finite difference against its neighbors, since a plain
+    point has no lane to ask for a heading)."""
     if route and len(route[0]) == 2:
-        return list(route)
+        pts = np.array(route, dtype=float)
+        if lateral == 0 or len(pts) < 2:
+            return [tuple(p) for p in pts]
+        offset_pts = np.empty_like(pts)
+        for i in range(len(pts)):
+            prev_i, next_i = max(i - 1, 0), min(i + 1, len(pts) - 1)
+            direction = pts[next_i] - pts[prev_i]
+            norm = np.linalg.norm(direction)
+            perp = np.array([-direction[1], direction[0]]) / norm if norm > 1e-9 else np.zeros(2)
+            offset_pts[i] = pts[i] + lateral * perp
+        return [tuple(p) for p in offset_pts]
     points = []
     for lane_index in route:
         lane = road.network.get_lane(lane_index)
-        for lon in np.linspace(0, lane.length, max(2, int(lane.length / 3))):
+        for lon in np.linspace(0, lane.length, _lane_sample_points(lane)):
             points.append(lane.position(lon, lateral))
     return points
 
@@ -128,6 +177,11 @@ def is_multi_route(route):
 
 
 def draw_route(surface, road, route, color, lateral: float, name: str, label: str):
+    """Draw one route's polyline, plus a green marker at its first point and
+    a red marker at its last -- so a route that starts or ends somewhere
+    unintended (short of a real lane, off in open space, short of the
+    network another vehicle would be dropped onto) is visible at a glance
+    instead of requiring a zoomed crop to spot."""
     try:
         points = route_polyline(road, route, lateral)
     except Exception as e:
@@ -136,6 +190,8 @@ def draw_route(surface, road, route, color, lateral: float, name: str, label: st
     pixels = [surface.vec2pix(p) for p in points]
     if len(pixels) >= 2:
         pygame.draw.lines(surface, color, False, pixels, max(surface.pix(0.3), ROUTE_WIDTH))
+        pygame.draw.circle(surface, ROUTE_START_COLOR, pixels[0], ROUTE_MARKER_RADIUS)
+        pygame.draw.circle(surface, ROUTE_END_COLOR, pixels[-1], ROUTE_MARKER_RADIUS)
 
 
 def draw_routes(surface, road, route, palette, lateral: float, name: str, label: str):
@@ -148,9 +204,71 @@ def draw_routes(surface, road, route, palette, lateral: float, name: str, label:
         draw_route(surface, road, sub_route, color, lateral, name, sub_label)
 
 
-def render_offscreen(name, size=None):
-    """Render a layout's road (+ HUMAN_ROUTE/ROBOT_ROUTE if defined) to its own Surface,
-    fit to the road's bounding box. None if it won't build."""
+def draw_bg_lanes(surface, road, lane_indexes, name: str):
+    """Highlight, in yellow, every lane scene1_background.add_background_traffic
+    would actually consider as a spawn candidate -- the exact
+    route_adjacent_lane_indexes() set watch.py passes it as `lane_indexes`
+    (see watch.py: `route_lanes = module.route_adjacent_lane_indexes(); sb.add_background_traffic(..., lane_indexes=route_lanes)`).
+    Drawn as a thin centerline overlay (not replacing the base line-type
+    rendering) so a lane that's structurally isolated -- present in the
+    network but never actually reachable by continuing forward from
+    anywhere a background vehicle would be dropped -- is still visible as
+    a plain white lane with no yellow overlay, distinguishable from one
+    that's a real, connected spawn candidate. Spawning here is a one-time
+    starting position, not a leash: once placed, a vehicle drives forward
+    via its own lane-to-lane continuation regardless of whether the next
+    fragment happens to be in this set, so this highlights *where a
+    vehicle can start*, not everywhere it can end up."""
+    for lane_index in lane_indexes:
+        try:
+            lane = road.network.get_lane(lane_index)
+        except KeyError as e:
+            print(f"  {name}: route_adjacent_lane_indexes gave a stale lane {lane_index}: {e}")
+            continue
+        pixels = [surface.vec2pix(lane.position(s, 0))
+                  for s in np.linspace(0, lane.length, _lane_sample_points(lane))]
+        if len(pixels) >= 2:
+            pygame.draw.lines(surface, BG_LANE_COLOR, False, pixels, max(surface.pix(0.15), BG_LANE_WIDTH))
+
+
+def draw_lane_arrows(surface, road):
+    """One small triangular arrow at the midpoint of EVERY lane in the
+    network (every (from, to, lane_id) edge, not just the human/robot's
+    own route or the background-eligible subset draw_bg_lanes covers),
+    pointing along that lane's own heading there -- so which way traffic
+    on a given lane actually flows is visible directly on the lane itself,
+    not just implied by which line is dashed vs solid. A lane's direction
+    is fixed by construction (see build_scene.py: every one-way movement
+    is its own separate lane object, position(s) always increasing s from
+    start to end), so one arrow at the midpoint is exactly this lane's own
+    direction everywhere along it, not just locally true near the sample
+    point -- no need for more than one per lane except on a curve tight
+    enough that showing only the midpoint heading could be mistaken for
+    the whole lane being straight, which for how this codebase's own
+    curves are used isn't a real risk.
+    """
+    for from_node, tos in road.network.graph.items():
+        for to_node, lanes in tos.items():
+            for lane in lanes:
+                if lane.length < ARROW_MIN_LANE_LENGTH:
+                    continue
+                s = lane.length / 2
+                position = np.array(lane.position(s, 0))
+                heading = lane.heading_at(s)
+                direction = np.array([np.cos(heading), np.sin(heading)])
+                lateral = np.array([-direction[1], direction[0]])
+                tip = position + (ARROW_LENGTH / 2) * direction
+                tail_center = position - (ARROW_LENGTH / 2) * direction
+                left = tail_center + (ARROW_WIDTH / 2) * lateral
+                right = tail_center - (ARROW_WIDTH / 2) * lateral
+                pygame.draw.polygon(surface, ARROW_COLOR,
+                                     [surface.vec2pix(tip), surface.vec2pix(left), surface.vec2pix(right)])
+
+
+def render_offscreen(name, size=None, show_bg_lanes=True):
+    """Render a layout's road (+ HUMAN_ROUTE/ROBOT_ROUTE, + every lane
+    background traffic could spawn on, if defined) to its own Surface, fit
+    to the road's bounding box. None if it won't build."""
     try:
         module = load_layout(name)
         road = module.build_road()
@@ -167,6 +285,18 @@ def render_offscreen(name, size=None):
     surface.origin = center - np.array([w / 2, h / 2]) / surface.scaling
 
     RoadGraphics.display(road, surface)
+    draw_lane_arrows(surface, road)
+
+    if show_bg_lanes:
+        route_adjacent = getattr(module, "route_adjacent_lane_indexes", None)
+        if route_adjacent is not None:
+            try:
+                lane_indexes = route_adjacent()
+            except Exception as e:
+                print(f"  {name}: route_adjacent_lane_indexes() failed: {type(e).__name__}: {e}")
+                lane_indexes = None
+            if lane_indexes:
+                draw_bg_lanes(surface, road, lane_indexes, name)
 
     human_route = getattr(module, "HUMAN_ROUTE", None)
     robot_route = getattr(module, "ROBOT_ROUTE", None)

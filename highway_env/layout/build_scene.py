@@ -13,6 +13,28 @@ from highway_env.road.graphics import RoadGraphics, WorldSurface
 LANE_WIDTH = AbstractLane.DEFAULT_WIDTH  # 4.0
 N, C, S = LineType.NONE, LineType.CONTINUOUS, LineType.STRIPED
 
+# The "+5" every turn radius in this file is built from -- exported so every
+# real_0XX_rebuilt.py's own local RIGHT_TURN_RADIUS_BASE = LANE_WIDTH + 5 (used
+# to position downstream junctions relative to this one's own turn geometry)
+# reads it from here instead of hardcoding its own separate copy of "5".
+#
+# lane_width + 5 = 9m at the default lane_width -- already a realistic,
+# roughly AASHTO-standard curb-return radius for an arterial/collector road
+# (real designs run ~4.5m for a tight residential corner up to ~9-15m for a
+# bigger arterial), not an arbitrary placeholder. It IS too tight to render
+# perfectly smoothly at extreme close-up: highway_env's own LaneGraphics
+# renders any curve as straight chords spaced STRIPE_SPACING=4.33m apart, so
+# a 90-degree turn at 9m radius gets only ~3 chords, visibly kinked once
+# zoomed in far enough. Tried fixing that by growing the radius instead (20,
+# then even 12): both moved AWAY from realistic proportions rather than
+# toward them, and 20 was bigger than this project's own ~25m access roads,
+# swallowing whole intersections into sprawling curves once every real_0XX
+# scene's downstream junction re-tuned around it (confirmed directly).
+# Left at the reference's own value: trading a real road's own realistic
+# scale for a rendering-only artifact that's invisible at every zoom level
+# this project actually views scenes at isn't a trade worth making.
+RIGHT_TURN_RADIUS_EXTRA = 5.0
+
 
 def add_four_way(net, center, n_vertical, n_horizontal, access_length=100.0, lane_width=LANE_WIDTH, prefix=""):
     """
@@ -43,7 +65,7 @@ def add_four_way(net, center, n_vertical, n_horizontal, access_length=100.0, lan
     """
     lanes = {0: n_vertical, 1: n_horizontal, 2: n_vertical, 3: n_horizontal}
     cx, cy = center
-    right_turn_radius_base = lane_width + 5
+    right_turn_radius_base = lane_width + RIGHT_TURN_RADIUS_EXTRA
 
     rotation = {c: np.array([[np.cos(np.radians(90 * c)), -np.sin(np.radians(90 * c))],
                               [np.sin(np.radians(90 * c)), np.cos(np.radians(90 * c))]]) for c in range(4)}
@@ -54,6 +76,20 @@ def add_four_way(net, center, n_vertical, n_horizontal, access_length=100.0, lan
         rot = rotation[corner]
         prev_c, next_c, opp_c = (corner - 1) % 4, (corner + 1) % 4, (corner + 2) % 4
         n_prev, n_next = lanes[prev_c], lanes[next_c]
+        # od(i) (below) grows with lane index -- necessary for the turn
+        # circles (an outer lane's own right/left turn needs a bigger
+        # radius), but it also anchors where "access_length further out"
+        # is MEASURED FROM. Left uncorrected, that means access_length
+        # away from a DIFFERENT stop-line per lane, so the far ends of a
+        # multi-lane arm land at different distances from center instead
+        # of a flat, perpendicular cut -- verified directly (every lane's
+        # own far point, an exact affine function of its own od(i), for
+        # n=2: 51.0m vs 55.3m from center, not the same 51.0m). od_far
+        # fixes the reference to the OUTERMOST lane's own od (the one
+        # that already sits furthest out) so every lane's own far point
+        # wraps around the SAME distance, while od(i) itself -- and every
+        # turn circle built from it -- stays exactly as it was.
+        od_far = right_turn_radius_base + (lane_width / 2 + (n - 1) * lane_width)
 
         for i in range(n):
             turn_lat = lane_width / 2 + i * lane_width
@@ -74,7 +110,7 @@ def add_four_way(net, center, n_vertical, n_horizontal, access_length=100.0, lan
             # opposing direction's own lanes -- is a dashed divider.
             edge_left, edge_right = S, (C if i == n - 1 else S)
 
-            start = np.array([cx, cy]) + rot @ np.array([turn_lat, access_length + od])
+            start = np.array([cx, cy]) + rot @ np.array([turn_lat, access_length + od_far])
             end = np.array([cx, cy]) + rot @ np.array([turn_lat, od])
             net.add_lane(o, ir, StraightLane(start, end, width=lane_width, line_types=[edge_left, edge_right]))
 
@@ -105,7 +141,7 @@ def add_four_way(net, center, n_vertical, n_horizontal, access_length=100.0, lan
 
             # exit: this corner's own mirrored (-turn_lat) lane.
             start_e = np.array([cx, cy]) + rot @ np.array([-turn_lat, od])
-            end_e = np.array([cx, cy]) + rot @ np.array([-turn_lat, access_length + od])
+            end_e = np.array([cx, cy]) + rot @ np.array([-turn_lat, access_length + od_far])
             net.add_lane(f"{prefix}il{corner}_{i}", o,
                          StraightLane(start_e, end_e, width=lane_width, line_types=[edge_left, edge_right]))
 
@@ -131,7 +167,7 @@ def add_three_way(net, center, n_stem, n_cross, access_length=100.0, lane_width=
     corners = [c for c in range(4) if c != missing_corner]
     lanes = {c: (n_stem if c == stem_corner else n_cross) for c in corners}
     cx, cy = center
-    right_turn_radius_base = lane_width + 5
+    right_turn_radius_base = lane_width + RIGHT_TURN_RADIUS_EXTRA
 
     rotation = {c: np.array([[np.cos(np.radians(90 * c)), -np.sin(np.radians(90 * c))],
                               [np.sin(np.radians(90 * c)), np.cos(np.radians(90 * c))]]) for c in range(4)}
@@ -141,6 +177,11 @@ def add_three_way(net, center, n_stem, n_cross, access_length=100.0, lane_width=
         angle = np.radians(90 * corner)
         rot = rotation[corner]
         prev_c, next_c, opp_c = (corner - 1) % 4, (corner + 1) % 4, (corner + 2) % 4
+        # See add_four_way's own docstring/comment on od_far: without it,
+        # each lane's far end sits access_length from ITS OWN stop-line
+        # (od(i), which grows with lane index for the turn circles), so a
+        # multi-lane arm's far edge lands staggered instead of flat.
+        od_far = right_turn_radius_base + (lane_width / 2 + (n - 1) * lane_width)
 
         for i in range(n):
             turn_lat = lane_width / 2 + i * lane_width
@@ -151,7 +192,7 @@ def add_three_way(net, center, n_stem, n_cross, access_length=100.0, lane_width=
             o, ir = f"{prefix}o{corner}_{i}", f"{prefix}ir{corner}_{i}"
             edge_left, edge_right = S, (C if i == n - 1 else S)
 
-            start = np.array([cx, cy]) + rot @ np.array([turn_lat, access_length + od])
+            start = np.array([cx, cy]) + rot @ np.array([turn_lat, access_length + od_far])
             end = np.array([cx, cy]) + rot @ np.array([turn_lat, od])
             net.add_lane(o, ir, StraightLane(start, end, width=lane_width, line_types=[edge_left, edge_right]))
 
@@ -182,69 +223,9 @@ def add_three_way(net, center, n_stem, n_cross, access_length=100.0, lane_width=
                              StraightLane(start_s, end_s, width=lane_width, line_types=[edge_left, edge_right]))
 
             start_e = np.array([cx, cy]) + rot @ np.array([-turn_lat, od])
-            end_e = np.array([cx, cy]) + rot @ np.array([-turn_lat, access_length + od])
+            end_e = np.array([cx, cy]) + rot @ np.array([-turn_lat, access_length + od_far])
             net.add_lane(f"{prefix}il{corner}_{i}", o,
                          StraightLane(start_e, end_e, width=lane_width, line_types=[edge_left, edge_right]))
-
-def turn_corner(net, center, heading_deg, n_lanes, access_length=60.0, lane_width=LANE_WIDTH, prefix=""):
-    """
-    A single 90-degree bend: n_lanes run straight in, curve right by 90
-    degrees, and continue straight out in the new direction.
-
-    All n_lanes share ONE circle center (like highway_env's own multi-lane
-    curves in RacetrackEnv/round_about), which is what actually keeps every
-    lane a constant lane_width apart along the ENTIRE curve rather than
-    only at the two ends -- independent per-lane circles (same radius,
-    different centers) satisfy the endpoints exactly but let the lanes
-    drift closer or farther apart in between, which is what read as
-    unclean. Radius shrinks by lane_width per lane INWARD (verified
-    directly, not assumed, that growing it outward instead flips the whole
-    turn onto the wrong side) -- so it's anchored at the OUTERMOST (curb)
-    lane getting the plain single-lane reference radius, and lanes further
-    in get progressively larger, gentler curves; anchoring it at the
-    innermost lane instead would leave the curb lane's own radius shrinking
-    toward zero as n_lanes grows, which is what actually produced the
-    sharp near-degenerate corner (and overlapping stripe segments right on
-    top of it) before this fix.
-
-    center: the point the turn curves around.
-    heading_deg: compass-style heading (same convention as add_four_way's
-    own `angle = 90 * corner`) of the incoming road; the outgoing road is
-    90 degrees clockwise from it.
-    """
-    right_turn_radius_base = lane_width + 5
-    angle_in = np.radians(heading_deg)
-    angle_out = angle_in - np.radians(90)
-    rot_in = np.array([[np.cos(angle_in), -np.sin(angle_in)], [np.sin(angle_in), np.cos(angle_in)]])
-    rot_out = np.array([[np.cos(angle_out), -np.sin(angle_out)], [np.sin(angle_out), np.cos(angle_out)]])
-    cx, cy = np.array(center)
-
-    # Anchored so radius = right_turn_radius_base exactly at the OUTERMOST
-    # lane (i = n_lanes - 1), not at i = 0.
-    base = right_turn_radius_base + (n_lanes - 1) * lane_width
-    od = base + lane_width / 2
-    r_center = np.array([cx, cy]) + rot_in @ np.array([od, od])
-
-    for i in range(n_lanes):
-        turn_lat = lane_width / 2 + i * lane_width
-        radius = base - i * lane_width
-        edge_left, edge_right = S, (C if i == n_lanes - 1 else S)
-
-        start = np.array([cx, cy]) + rot_in @ np.array([turn_lat, access_length + od])
-        end = np.array([cx, cy]) + rot_in @ np.array([turn_lat, od])
-        net.add_lane(f"{prefix}in_{i}", f"{prefix}mid_{i}",
-                     StraightLane(start, end, width=lane_width, line_types=[edge_left, edge_right]))
-
-        out_start = np.array([cx, cy]) + rot_out @ np.array([-turn_lat, od])
-        out_end = np.array([cx, cy]) + rot_out @ np.array([-turn_lat, access_length + od])
-        net.add_lane(f"{prefix}mid_{i}", f"{prefix}mid2_{i}",
-                     CircularLane(r_center, radius, angle_in + np.radians(180),
-                                  angle_in + np.radians(270), clockwise=True, width=lane_width,
-                                  line_types=[edge_left, edge_right]))
-
-        net.add_lane(f"{prefix}mid2_{i}", f"{prefix}out_{i}",
-                     StraightLane(out_start, out_end, width=lane_width, line_types=[edge_left, edge_right]))
-
 
 def _bend(start, heading, radius, angle_change):
     """
@@ -268,6 +249,33 @@ def _bend(start, heading, radius, angle_change):
     return center, radius, start_phase, end_phase, clockwise
 
 
+def _solve_bend_radius(p_start, h_start, angle_change, axis_origin, lateral, target_offset):
+    """The radius R such that _bend(p_start, h_start, R, angle_change)'s own
+    far endpoint lands EXACTLY `target_offset` meters along `lateral` from
+    axis_origin -- so the bend can be aimed directly at the lane's own
+    final, safely-separated position instead of landing wherever it
+    naturally falls and needing a second stage to correct it afterward.
+
+    The far endpoint's own offset along `lateral` is an EXACTLY affine
+    (linear) function of R: _bend's own center is p_start + R*(a fixed unit
+    vector depending only on h_start and angle_change's sign), and the far
+    point is that center plus R*(another fixed unit vector depending only
+    on angle_change) -- both terms scale with R alone, nothing else varies
+    with it. Verified directly by sampling multiple R and confirming a
+    constant slope. Two sample radii therefore determine the line exactly;
+    no iterative solver, no risk of it not converging.
+    """
+    def offset_at(R):
+        c, r, sp, ep, _ = _bend(p_start, h_start, R, angle_change)
+        p_far = c + r * np.array([np.cos(ep), np.sin(ep)])
+        return np.dot(p_far - axis_origin, lateral)
+
+    r1, r2 = 10.0, 30.0
+    o1, o2 = offset_at(r1), offset_at(r2)
+    slope = (o2 - o1) / (r2 - r1)
+    return max(r1 + (target_offset - o1) / slope, 1.0)
+
+
 def round_about(net, center, radius, n_lanes=2, access_length=100.0, lane_width=LANE_WIDTH,
                  alpha=24.0, merge_radius=30.0, prefix=""):
     """
@@ -287,16 +295,68 @@ def round_about(net, center, radius, n_lanes=2, access_length=100.0, lane_width=
     a dashed divider, drawn once and left blank on the matching edge of
     the neighboring lane so it isn't drawn twice.
 
-    Where the reference eases each access lane in with a SineLane, this
-    uses a plain CircularLane (see _bend): each lane bends by exactly
-    (90 - alpha) degrees from the ring's own tangent there back to
-    parallel with the cardinal axis, then runs straight the rest of
-    access_length. That's what keeps the access road's two lanes close
-    together for most of their length and only fork apart near the ring,
-    instead of diverging in a straight line the whole way out.
+    Each cardinal side gets 2*n_lanes lanes total: n_lanes entering (merging
+    in) and n_lanes leaving (peeling off), each its own physically separate,
+    one-way lane -- never one lane object serving both directions, and
+    never crossing paths with each other (see below). Getting from the
+    ring's own tangent heading at entry_k/exit_k back to parallel with the
+    cardinal axis uses a plain CircularLane bend (see _bend): each lane
+    bends by exactly (90 - alpha) degrees, same as ever -- that part of the
+    geometry isn't what was wrong.
+
+    What was wrong: that bend's own two ends (entry and exit, mirrored
+    around the cardinal axis at +/-alpha degrees on the ring) do NOT
+    reliably end up a safe lane_width apart just because the geometry is
+    mirrored -- verified directly by sweeping alpha and merge_radius: the
+    resulting separation crosses back through zero at multiple seemingly-
+    reasonable parameter combinations (it's a real geometric
+    near-cancellation, not a rare edge case), so at the default alpha=24/
+    merge_radius=16 combination used throughout this codebase's own
+    scenes, entry and exit ended up only ~1.1m apart -- less than a real
+    vehicle's own width, which is exactly what "cars butting against each
+    other" looks like: a car merging in and a car leaving at the same gap,
+    running nearly head-on for the whole access road. Tuning alpha/
+    merge_radius to some OTHER combination that happens to test out safe
+    isn't a real fix either (the same sweep shows plenty of OTHER
+    seemingly-reasonable combinations that are just as broken).
+
+    An earlier version left the bend's own natural (too-close) far point
+    alone and added a SECOND stage afterward -- an explicit SineLane
+    shifting each lane out to a safe offset before running straight the
+    rest of the way. That worked geometrically (verified: tangent, exactly
+    lane_width apart) but LOOKED wrong: entry and exit still visibly
+    pinched together right where the first stage's own natural, too-close
+    point was, before opening back out -- a "twist" instead of two lanes
+    that just stay apart the whole time, the opposite of "smooth, natural,
+    separated." The actual fix -- _solve_bend_radius, above -- aims the
+    ORIGINAL bend itself at the final safe offset directly, by solving for
+    the one merge_radius (per lane, per direction) that lands it there
+    exactly. One continuous curve from the ring to the far edge, always
+    lane_width apart or more along its entire length, nothing to pinch.
+
+    Which SIDE each lane's target offset sits on isn't a free choice
+    either: it has to land on the same +lateral side add_four_way's own
+    approach/exit lanes always use (see add_four_way's own docstring --
+    verified directly there: an outer lane's larger offset is always
+    reached by walking further in THAT lane's own +lateral direction,
+    never a "whichever side is closer" choice). Picking the sign from the
+    bend's own natural (tiny) offset instead doesn't reliably agree with
+    the adjacent junction's own fixed convention, and produces a
+    roundabout-to-junction bridge that cuts across at a steep diagonal
+    instead of running parallel to its own partner lane -- so
+    target_offset below is always +turn_lat, unconditionally, in each
+    lane's own lateral_in/lateral_out frame, exactly add_four_way's rule,
+    never a per-gap guess.
+
+    This is what farin/bendin/entry and exit/bendout/farout actually
+    resolve to now; every caller that queries farin*/farout*'s own
+    position (to bridge a neighboring junction to the roundabout) picks up
+    the corrected, safely-separated point automatically, with no changes
+    needed on its own end.
     """
     cx, cy = np.array(center)
     bend_angle = np.radians(90 - alpha)
+    right_turn_radius_base = lane_width + RIGHT_TURN_RADIUS_EXTRA  # same constant add_four_way/add_three_way/turn_corner use for every turn
 
     def point_at(angle_rad, r):
         return np.array([cx, cy]) + r * np.array([np.cos(angle_rad), np.sin(angle_rad)])
@@ -332,9 +392,18 @@ def round_about(net, center, radius, n_lanes=2, access_length=100.0, lane_width=
         base_rad = np.radians(base_deg)
         a_entry = np.radians(base_deg - alpha)
         a_exit = np.radians(base_deg + alpha)
+        axis_origin = point_at(base_rad, 0.0)
+        h_far_entry = base_rad + np.pi  # verified: the bend's own far end is exactly axis-parallel, heading toward the ring
+        h_far_exit = base_rad           # verified: exactly axis-parallel, heading away from the ring
+        direction_in = np.array([np.cos(h_far_entry), np.sin(h_far_entry)])
+        lateral_in = np.array([-direction_in[1], direction_in[0]])
+        direction_out = np.array([np.cos(h_far_exit), np.sin(h_far_exit)])
+        lateral_out = np.array([-direction_out[1], direction_out[0]])
+
         for lane_i in range(n_lanes):
             r = radius + lane_i * lane_width
             edge_left, edge_right = S, (C if lane_i == n_lanes - 1 else S)
+            turn_lat = lane_width / 2 + lane_i * lane_width  # add_four_way's own approach/exit separation convention
 
             # Merging in: the real (forward) arc runs from far away, heading
             # radially inward, bending to the ring's own tangent heading at
@@ -348,11 +417,36 @@ def round_about(net, center, radius, n_lanes=2, access_length=100.0, lane_width=
             # same center/radius with start/end swapped and clockwise
             # flipped (traversing one arc in opposite directions flips its
             # effective direction).
+            #
+            # Radius: PREFER right_turn_radius_base -- the exact same
+            # constant add_four_way/add_three_way/turn_corner use for every
+            # turn in the scene, so this bend reads as the same kind of
+            # curve, not a bespoke one -- capped by the caller's own
+            # merge_radius if that's tighter still (merge_radius keeps its
+            # original meaning as an upper bound a caller can pull in), and
+            # by _solve_bend_radius's own exact-target radius as the last
+            # resort. Offset shrinks as radius grows (verified directly,
+            # and it's why _solve_bend_radius works at all -- see its own
+            # docstring), so the SMALLEST of the three is always the safe
+            # choice: right_turn_radius_base alone already reaches turn_lat
+            # for every alpha actually used in this codebase (verified
+            # directly -- alpha=24 clears it by nearly 2x), so that's what
+            # wins here (merge_radius=16 in every one of this codebase's
+            # own scenes is larger, so it isn't the binding constraint);
+            # only an alpha tight enough that right_turn_radius_base
+            # wouldn't be safe (verified directly: somewhere between
+            # alpha=15 and alpha=20) falls through to the exact solve.
+            # Either way the result is one continuous curve at ONE fixed
+            # radius, never a natural-radius bend patched with a second
+            # stage afterward.
             p_entry = point_at(a_entry, r)
             h_entry = tangent_at(a_entry)
-            center_, radius_, sp, ep, cw = _bend(p_entry, h_entry + np.pi, merge_radius, -bend_angle)
+            radius_in = min(merge_radius, right_turn_radius_base,
+                             _solve_bend_radius(p_entry, h_entry + np.pi, -bend_angle, axis_origin, lateral_in, turn_lat))
+            center_, radius_, sp, ep, cw = _bend(p_entry, h_entry + np.pi, radius_in, -bend_angle)
             p_far_entry = center_ + radius_ * np.array([np.cos(ep), np.sin(ep)])
-            p_in = p_far_entry - (access_length - merge_radius) * np.array([np.cos(base_rad + np.pi), np.sin(base_rad + np.pi)])
+            p_in = p_far_entry - max(access_length - radius_in, 2.0) * direction_in
+
             net.add_lane(f"{prefix}farin{k}_{lane_i}", f"{prefix}bendin{k}_{lane_i}",
                          StraightLane(p_in, p_far_entry, width=lane_width, line_types=[edge_left, edge_right]))
             net.add_lane(f"{prefix}bendin{k}_{lane_i}", f"{prefix}entry{k}_{lane_i}",
@@ -360,12 +454,16 @@ def round_about(net, center, radius, n_lanes=2, access_length=100.0, lane_width=
                                       width=lane_width, line_types=[edge_left, edge_right]))
 
             # Leaving: bend from the ring's tangent heading at exit_k to
-            # heading radially outward (away from the center).
+            # heading radially outward (away from the center), same
+            # radius rule as entry above.
             p_exit = point_at(a_exit, r)
             h_exit = tangent_at(a_exit)
-            center2, radius2, sp2, ep2, cw2 = _bend(p_exit, h_exit, merge_radius, bend_angle)
+            radius_out = min(merge_radius, right_turn_radius_base,
+                              _solve_bend_radius(p_exit, h_exit, bend_angle, axis_origin, lateral_out, turn_lat))
+            center2, radius2, sp2, ep2, cw2 = _bend(p_exit, h_exit, radius_out, bend_angle)
             p_far_exit = center2 + radius2 * np.array([np.cos(ep2), np.sin(ep2)])
-            p_out = p_far_exit + (access_length - merge_radius) * np.array([np.cos(base_rad), np.sin(base_rad)])
+            p_out = p_far_exit + max(access_length - radius_out, 2.0) * direction_out
+
             net.add_lane(f"{prefix}exit{k}_{lane_i}", f"{prefix}bendout{k}_{lane_i}",
                          CircularLane(center2, radius2, sp2, ep2, clockwise=cw2,
                                       width=lane_width, line_types=[edge_left, edge_right]))
@@ -391,7 +489,7 @@ def connect_junctions(net, prefix_a, center_a, access_length_a, corner_a,
     -turn_lat) feeds A's approach (local +turn_lat) -- matching how
     add_four_way/add_three_way build "end_e" and "start" themselves.
     """
-    right_turn_radius_base = lane_width + 5
+    right_turn_radius_base = lane_width + RIGHT_TURN_RADIUS_EXTRA
     rotation = {c: np.array([[np.cos(np.radians(90 * c)), -np.sin(np.radians(90 * c))],
                               [np.sin(np.radians(90 * c)), np.cos(np.radians(90 * c))]]) for c in range(4)}
     rot_a, rot_b = rotation[corner_a], rotation[corner_b]
@@ -514,6 +612,21 @@ def cx_cy(cx, cy, rot, lx, ly):
 
 
 if __name__ == "__main__":
+
+    # Standalone demo: build a single junction (nothing else -- no second
+    # junction, no connect_junctions) and render it to a PNG, so
+    # `python build_scene.py` alone is a quick visual check that this one
+    # primitive looks right, without needing a full scene file. Currently
+    # showing add_three_way; the add_four_way call right above it is left
+    # in place, commented out, to switch back to.
+    #
+    # Lanes come from add_four_way itself (this file). The direction
+    # arrows do NOT -- they're display_all.draw_lane_arrows, a rendering
+    # helper that lives in display_all.py and gets called on top of
+    # RoadGraphics.display by every renderer in this project (play.py,
+    # watch.py, scene1_background.py, and this demo too). build_scene.py
+    # only ever builds the RoadNetwork; it doesn't know how to draw one.
+
     import sys
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import display_all as d
@@ -525,21 +638,12 @@ if __name__ == "__main__":
     pygame.init()
     net = RoadNetwork()
 
-    n_shared = 3
-    access_a, access_b = 60.0, 60.0
-    center_a = (0.0, 0.0)
-    center_b = (220.0, 0.0)  # to the east of the 4-way, far enough that every lane's bridge runs the right way
-
-    add_four_way(net, center=center_a, n_vertical=3, n_horizontal=n_shared, access_length=access_a, prefix="a_")
-    # missing_corner=3 (East) so the T's stem (corner (3+2)%4=1, West) points
-    # back at the 4-way, connecting to its East arm (corner 3).
-    add_three_way(net, center=center_b, n_stem=n_shared, n_cross=3, access_length=access_b,
-                  prefix="b_", missing_corner=3)
-    connect_junctions(net, "a_", center_a, access_a, 3, "b_", center_b, access_b, 1, n_shared)
+    # add_four_way(net, center=(0.0, 0.0), n_vertical=2, n_horizontal=2, access_length=40.0, prefix="a_")
+    add_three_way(net, center=(0.0, 0.0), n_stem=2, n_cross=2, access_length=40.0, prefix="a_", missing_corner=2)
 
     road = Road(network=net)
 
-    w, hh = 1400, 1000
+    w, hh = 1000, 1000
     min_x, max_x, min_y, max_y = d.road_bounding_box(road)
     surface = WorldSurface((w, hh), 0, pygame.Surface((w, hh)))
     surface.scaling = min(w / ((max_x - min_x) * 1.1), hh / ((max_y - min_y) * 1.1))
@@ -547,6 +651,13 @@ if __name__ == "__main__":
     surface.origin = center - np.array([w / 2, hh / 2]) / surface.scaling
     surface.fill(surface.GREY)
     RoadGraphics.display(road, surface)
-    out = "/private/tmp/claude-501/-Users-mishafu-Desktop-obs-function/73fdcefc-76db-48cc-b88f-fed37b951c0c/scratchpad/lane_merge/build_scene_stacked.png"
+    d.draw_lane_arrows(surface, road)
+    # No HUMAN_ROUTE here to bias route_adjacent_lane_indexes() around (this
+    # is a bare network, not a scene file) -- every lane IS the natural
+    # equivalent, so highlight all of them the same yellow draw_bg_lanes
+    # uses everywhere else, instead of just silently having none.
+    all_lanes = [(f, t, i) for f, tos in net.graph.items() for t, lanes in tos.items() for i in range(len(lanes))]
+    d.draw_bg_lanes(surface, road, all_lanes, "build_scene demo")
+    out = os.path.join(os.path.dirname(os.path.abspath(__file__)), "build_scene_demo.png")
     pygame.image.save(surface, out)
     print("saved", out)

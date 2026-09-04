@@ -21,7 +21,7 @@ import display_all as d  # noqa: E402
 import scene1_background as sb  # noqa: E402
 import limit_vision_human as h  # noqa: E402
 
-SCENE = "mega_scene"
+SCENE = "real_001_rebuilt"
 DT = 1 / 15
 HARD_BRAKE_THRESHOLD = -4.0  # m/s^2; also always true when crossing_conflict_brake fires (-8.0)
 
@@ -163,12 +163,21 @@ def run_unit_checks():
 # SIMULATION HARNESS
 # ============================================================================
 
-def run_one(fov_deg, seed, background_count=18, steps=1800, enable_occlusion=True, log_prefix=""):
+def run_one(fov_deg, seed, background_count=28, steps=1800, enable_occlusion=True, log_prefix=""):
     module = d.load_layout(SCENE)
     road = module.build_road()
     human = h.add_human_vehicle(road, module.HUMAN_ROUTE, fov_deg=fov_deg,
                                  enable_occlusion=enable_occlusion)
-    sb.add_background_traffic(road, count=background_count, seed=seed)
+    # Bias spawn density toward lanes the human's own route actually comes
+    # near, when the layout exposes that (mega_scene does; real_*.py scenes
+    # don't and fall back to every lane, unchanged from before). A uniform
+    # spawn over a small synthetic network like mega_scene puts a lot of
+    # `count` on lanes the human never visits (round_about's own unused
+    # cardinals, etc.), which is why an earlier sweep here showed literally
+    # identical numbers at every FOV width -- the human rarely had anything
+    # nearby to actually miss.
+    route_lanes = getattr(module, "route_adjacent_lane_indexes", lambda: None)()
+    sb.add_background_traffic(road, count=background_count, seed=seed, lane_indexes=route_lanes)
     lane_indexes = sb.all_lane_indexes(road)
     total_len = h.route_total_length(module.HUMAN_ROUTE)
 
@@ -241,7 +250,7 @@ def run_one(fov_deg, seed, background_count=18, steps=1800, enable_occlusion=Tru
     return result
 
 
-def run_sweep(fov_widths=(360, 90, 60, 30), seeds=(0, 1), background_count=18, steps=1800):
+def run_sweep(fov_widths=(360, 90, 60, 30), seeds=(0, 1), background_count=28, steps=1800):
     print(f"\n=== FOV SWEEP: widths={fov_widths} seeds={seeds} "
           f"background_count={background_count} steps={steps} ({steps*DT:.0f}s sim) ===\n")
     t0 = time.time()
@@ -284,7 +293,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--sweep", action="store_true", help="also run the full FOV sweep (slow)")
     parser.add_argument("--steps", type=int, default=1800)
-    parser.add_argument("--background-count", type=int, default=18)
+    parser.add_argument("--background-count", type=int, default=28)
     args = parser.parse_args()
 
     run_unit_checks()

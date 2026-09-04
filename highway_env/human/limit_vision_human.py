@@ -91,85 +91,16 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # highway_env/
 import scene1_background as sb  # noqa: E402
+from common.geometry import in_cone, is_occluded, segment_intersects_rotated_rect  # noqa: E402,F401
 
 FOV_DEG_DEFAULT = 120.0
 
 
-# -- geometry: cone + occlusion, both pure functions of current state only --
-
-def in_cone(ego_position, ego_heading, target_position, fov_deg):
-    """True iff target_position lies within fov_deg of ego_heading, as seen
-    from ego_position. fov_deg >= 360 is vacuously true (matches the
-    Overcooked precedent's stance: no separate radius/omniscience baked in
-    here either -- occlusion still applies at 360, see is_occluded)."""
-    if fov_deg >= 360:
-        return True
-    delta = np.asarray(target_position, dtype=float) - np.asarray(ego_position, dtype=float)
-    dist = np.linalg.norm(delta)
-    if dist < 1e-6:
-        return True
-    heading_vec = np.array([np.cos(ego_heading), np.sin(ego_heading)])
-    cos_angle = np.dot(delta, heading_vec) / dist
-    # small epsilon: cos(radians(90)) is ~6e-17, not exactly 0, so an exact
-    # boundary case (e.g. fov=180, target exactly perpendicular) would
-    # otherwise fail this comparison by pure floating-point noise.
-    return cos_angle >= np.cos(np.radians(fov_deg / 2.0)) - 1e-9
-
-
-def segment_intersects_rotated_rect(a, b, center, length, width, angle):
-    """True iff the line segment a->b crosses the rectangle centered at
-    `center` (dimensions length x width, rotated by `angle` radians, same
-    rotation convention as highway_env.utils.point_in_rotated_rectangle).
-
-    Exact segment-vs-axis-aligned-box test (Liang-Barsky clipping) done in
-    the rectangle's own unrotated frame, rather than reusing
-    highway_env.utils.rotated_rectangles_intersect via a near-zero-width
-    degenerate rectangle: that function is corner-sampling (does any corner
-    of one rectangle land inside the other), which is a reasonable
-    approximation for two comparably-sized rectangles (what it's built for
-    elsewhere in highway-env) but unreliable for a thin ray THROUGH the
-    middle of a blocker -- exactly the common "car hidden behind another
-    car" case this module exists to detect, where neither rectangle's
-    corners land inside the other at all.
-    """
-    c, s = np.cos(-angle), np.sin(-angle)
-    rot = np.array([[c, -s], [s, c]])
-    center = np.asarray(center, dtype=float)
-    la = rot @ (np.asarray(a, dtype=float) - center)
-    lb = rot @ (np.asarray(b, dtype=float) - center)
-    dx, dy = lb[0] - la[0], lb[1] - la[1]
-    half_l, half_w = length / 2.0, width / 2.0
-    t0, t1 = 0.0, 1.0
-    for p, q in ((-dx, la[0] - (-half_l)), (dx, half_l - la[0]),
-                 (-dy, la[1] - (-half_w)), (dy, half_w - la[1])):
-        if abs(p) < 1e-12:
-            if q < 0:
-                return False  # parallel to this edge and outside it
-            continue
-        r = q / p
-        if p < 0:
-            if r > t1:
-                return False
-            t0 = max(t0, r)
-        else:
-            if r < t0:
-                return False
-            t1 = min(t1, r)
-    return t0 <= t1
-
-
-def is_occluded(ego_position, target_position, blockers):
-    """True iff any vehicle in `blockers` sits on the straight line between
-    ego and target. Crashed/stationary vehicles are included "for free" --
-    blockers is whatever the caller passes (typically every other nearby
-    vehicle, crashed or not), and wreckage should still occlude."""
-    for other in blockers:
-        length = getattr(other, "LENGTH", 5.0)
-        width = getattr(other, "WIDTH", 2.0)
-        if segment_intersects_rotated_rect(ego_position, target_position,
-                                            other.position, length, width, other.heading):
-            return True
-    return False
+# -- geometry: cone + occlusion -- lives in highway_env/common/geometry.py
+# (pure functions of positions/headings/extents only, no route/task
+# knowledge, a sibling of human/ and robot/ so neither depends on the
+# other), re-exported above unchanged so nothing importing them from here
+# breaks.
 
 
 # -- route progress: stateless nearest-point-on-polyline projection --------
@@ -264,15 +195,45 @@ def route_aware_continuation(road, lane_indexes, vehicle, route_points,
         return None
 
     veh_progress, _ = _route_progress(route_points, vehicle.position)
-    best_idx, best_key = None, None
+    scored = []
     for idx, start in candidates:
         prog, dist_to_route = _route_progress(route_points, start)
+        scored.append((idx, prog, dist_to_route))
+
+    # ON-PATH GATE, checked before the progress-tier split below: a
+    # candidate's own "prog" value is the arc-length of whichever route
+    # point happens to be NEAREST it, which is only a meaningful "how far
+    # along am I" reading when the candidate is actually close to the
+    # route to begin with. On a real multi-lane road (e.g.
+    # real_001_rebuilt), a PARALLEL lane's own next fragment can sit a
+    # full lane-width off the route (dist_to_route several meters) while
+    # still nominally projecting to a LARGER prog than the correct,
+    # right-there (dist_to_route ~= 0) fragment -- confirmed directly: a
+    # fragment 0.55m away with prog=211.83 (veh_progress=212.00, so just
+    # BEHIND -- tier 1) lost to one 5.92m away with prog=215.83 (tier 0),
+    # even though the close one was obviously the real next segment of
+    # the road already being driven. Picking the far one for one tick
+    # produces a real, visible heading snap (confirmed: -260.67 ->
+    # -250.67 degrees) as the vehicle jumps onto a parallel lane and back
+    # -- exactly the "shakes while turning" symptom. Requiring a
+    # candidate's own dist_to_route to be within ON_PATH_EPSILON of
+    # whatever the CLOSEST candidate achieves before it's even allowed to
+    # win on progress fixes this without touching the ranking for the
+    # ordinary (single close candidate, or several genuinely comparable
+    # ones) case, where every real candidate already has a small
+    # dist_to_route and this gate never excludes anything.
+    ON_PATH_EPSILON = 1.0  # meters
+    best_dist_to_route = min(d for _, _, d in scored)
+
+    best_idx, best_key = None, None
+    for idx, prog, dist_to_route in scored:
+        on_path = dist_to_route <= best_dist_to_route + ON_PATH_EPSILON
         # (0, prog) always outranks (1, dist_to_route): any real forward
         # progress beats the fallback, and among progressing candidates the
         # SMALLEST forward step wins (the very next point ahead, not a
-        # jump). Among non-progressing candidates, prefer whichever pulls
-        # closest back toward the route itself.
-        key = (0, prog) if prog > veh_progress + 0.5 else (1, dist_to_route)
+        # jump). Among non-progressing (or off-path) candidates, prefer
+        # whichever pulls closest back toward the route itself.
+        key = (0, prog) if (on_path and prog > veh_progress + 0.5) else (1, dist_to_route)
         if best_key is None or key < best_key:
             best_key, best_idx = key, idx
     return best_idx
@@ -371,6 +332,7 @@ def apply_human_aware_car_following(road, lane_indexes, dt, radius=35.0):
     only -- see find_front_vehicle's own docstring in scene1_background.py).
     """
     sb.apply_better_car_following(road, lane_indexes, dt, radius=radius)
+    _unstick_frozen_background(road, dt)
 
     humans = [v for v in road.vehicles if isinstance(v, LimitedVisionHuman) and not v.crashed]
     for h in humans:
@@ -397,6 +359,245 @@ def apply_human_aware_car_following(road, lane_indexes, dt, radius=35.0):
             accel = min(accel, conflict)
 
         h.action["acceleration"] = max(accel, -h.speed / dt)
+        _unstick_if_frozen(road, h, front, visible, dt)
+
+    _resolve_stuck_route_pair(road, dt)
+
+
+STALL_TIMEOUT_S = 20.0  # how long the human can be genuinely motionless before its own blocker is cleared
+
+
+def _unstick_if_frozen(road, human, front, visible, dt):
+    """crossing_conflict_brake's own tie-break (scene1_background.py) is
+    extensively tuned to resolve most head-on/crossing standoffs without
+    ever forcing an unsafe release, but its own docstring documents real,
+    remaining cases -- two vehicles from different lanes both stopped right
+    at a shared merge point -- that it deliberately does NOT force through,
+    since forcing it there traded permanent freezes for new collisions in
+    testing. That's an acceptable risk to leave open for anonymous
+    background traffic; it is not acceptable for the one human this whole
+    module exists to study getting stuck behind it forever (see
+    advance_vehicles_with_route's own "never strand the human" rule).
+
+    Scoped as narrowly as possible to avoid the exact destabilization
+    scene1_background.py's advance_vehicles() docstring already warned
+    about for a broader "remove anything stationary" rule: only ever
+    removes ONE vehicle -- the human's own immediate front_vehicle if it
+    has one, else (measured necessary: a human repeatedly re-triggering
+    crossing_conflict_brake against a DIFFERENT nearby vehicle each tick
+    has no front_vehicle at all, so was never being cleared by the
+    front_vehicle-only version of this function and stalled permanently,
+    confirmed by testing out to 400s of sim time with zero progress) the
+    single closest other vehicle it can currently see -- and only after the
+    human itself has been essentially stationary for STALL_TIMEOUT_S
+    straight seconds, long past any ordinary queue wait. This behaves the
+    same as a real-world "someone gets out and moves the stalled car"
+    outcome rather than an invisible teleport of the human itself.
+    """
+    human._stalled_ticks = human._stalled_ticks + 1 if human.speed < 0.5 else 0
+    if human._stalled_ticks * dt < STALL_TIMEOUT_S:
+        return
+    blocker = front
+    if blocker is None and visible:
+        blocker = min(visible, key=lambda v: np.linalg.norm(np.asarray(v.position) - np.asarray(human.position)))
+    # A route-following blocker (the robot) can't be despawned -- that case
+    # is a genuine human-vs-robot standoff, not "stuck behind background
+    # traffic", and is handled separately by _resolve_stuck_route_pair
+    # (called once per tick regardless of whether this function fires at
+    # all, so it isn't gated on human._stalled_ticks specifically).
+    if blocker is not None and getattr(blocker, "route_points", None) is None:
+        road.vehicles.remove(blocker)
+    human._stalled_ticks = 0
+
+
+def _resolve_stuck_route_pair(road, dt, retreat=12.0, clear_dist=10.0, retreat_safe_distance=5.0):
+    """The route-following (human/robot) counterpart to _unstick_if_frozen's
+    background-blocker case: crossing_conflict_brake's tie-break correctly
+    decides WHO should go first between two mutually-stopped vehicles (its
+    own `_stopped_ticks`/id ordering -- see that function's docstring), but
+    its safe_release_dist=10.0 gate can leave even the rightful winner stuck
+    forever if the merge point itself puts them closer than that. Observed
+    exactly this way in testing: the human's left turn and the robot's
+    straight-through movement converge on mega_scene's tw_il2_0 node only
+    ~6m apart -- both approaches genuinely end at the same physical point by
+    construction (add_three_way/add_four_way build every turn/straight
+    option at a corner to land on the same subsequent lane), so a real
+    real-world stop-line offset never got built in here -- held motionless
+    380+s straight in testing: the tie-break picked a winner correctly
+    (confirmed: the human's own _stopped_ticks was consistently higher) but
+    that winner still needed dist>=10 to actually be released, which this
+    particular convergence geometry never reaches on its own.
+
+    A LOOSENED release distance was tried first (as low as 3.0, scoped only
+    to an already-timed-out route-vehicle pair) and rejected: it did get the
+    winner moving, but at this geometry "close enough to release" and "close
+    enough to actually collide" turned out to be nearly the same number --
+    confirmed by testing (a real crash at min_gap=3.72, both vehicles ~5m
+    long, converging at a 68 degree relative heading -- their rotated
+    rectangles can overlap well before a raw center-to-center distance gets
+    anywhere near what crossing_conflict_brake's own docstring found unsafe
+    to relax globally). Loosening a proximity-based safety check at exactly
+    the range where two vehicle bodies can overlap is not a threshold to
+    tune away.
+
+    THIS VERSION NEVER LOOSENS A SAFETY CHECK. It repositions the LOSER
+    backward along its own current lane instead -- the same category of
+    intervention as _unstick_if_frozen's own "someone gets out and moves the
+    stalled car" (a bounded, one-time nudge, not an ongoing exemption) --
+    until the EXISTING, already-validated crossing_conflict_brake release
+    (safe_release_dist=10.0, completely unmodified) sees real clearance and
+    releases the winner through its own normal logic on a later tick. Only
+    ever moves a vehicle that's already fully stopped and going nowhere
+    anyway (the loser, by definition, is the one NOT released), so there is
+    no discontinuity in the winner's own trajectory to reason about, and
+    nothing about crossing_conflict_brake or find_front_vehicle changes for
+    anyone.
+
+    The retreat distance is capped by `retreat_safe_distance` clearance from
+    EVERY other vehicle on the road, not just the winner of this pair --
+    confirmed as a real, not theoretical, gap: a blind `retreat` meters
+    backward considers only the two vehicles in this standoff, so it can
+    walk the loser straight into a completely unrelated third vehicle
+    (background traffic, say) that happens to already be sitting at the
+    destination point. Measured directly: a route vehicle retreated the
+    full 12m landed 2.7m from a stopped background vehicle it had never
+    interacted with and crashed into it the very next tick -- an artificial
+    collision from this function's own teleport, not from any ordinary
+    driving decision. Tries the full requested retreat first, then less, in
+    0.5m steps (fine enough that a clear gap narrower than 1m can't be
+    stepped over and missed entirely), down to no movement at all if
+    nothing along that stretch is clear -- never moving is always at least
+    as safe as the vehicle's own current, already-non-crashed position.
+
+    retreat_safe_distance=5.0 (~one vehicle length, comfortably more than
+    the 2.7m gap that produced the confirmed crash above) rather than
+    something closer to crossing_conflict_brake's own safe_release_dist=10.0
+    -- that larger a bar was tried first and made things WORSE, not just
+    redundant: in the dense multi-robot/background traffic this module is
+    meant to run under, a full 10m of clearance from EVERY nearby vehicle is
+    often simply unavailable anywhere within a 12m retreat, so the search
+    fell back to "don't move" almost every time -- confirmed directly: a
+    scene that reached 100% route progress with the plain (unsafe) retreat
+    dropped to stalling around 25% once retreat_safe_distance=8.0 made the
+    search fail this often. 5.0 is the smallest value that still
+    categorically prevents the specific failure this exists to fix (two
+    vehicle bodies overlapping) without also defeating the retreat's own
+    purpose.
+
+    If the DESIGNATED loser still has nowhere safe to go (a genuinely
+    saturated local cluster -- confirmed directly: a human and two robots
+    all mutually within a few meters, each stopped 300+ seconds straight,
+    the assigned loser's own 12m stretch never once clear), this falls back
+    to trying the WINNER instead. The winner is, by definition, also
+    currently stopped and non-crashed here (both members of a pair must be
+    to reach this point at all), so nudging it back is exactly as safe a
+    move as nudging the loser -- it just means whichever of the two
+    actually has room to move is the one that does, rather than the tie-
+    break's own priority silently deciding "neither ever moves" purely
+    because its designated pick happened to have the more crowded side.
+
+    ALSO retreats the winner (in addition to the loser, not instead of)
+    once the winner's own _stopped_ticks passes EXTREME_STALL_S. The
+    winner/loser choice below is inherited from crossing_conflict_brake's
+    own fairness convention -- whoever's waited LONGER wins, exactly like a
+    real 4-way-stop -- which is the right call for a BRIEF mutual standoff,
+    but stops making sense once one side has been stopped for MINUTES: that
+    length of stall is itself evidence the "winner" was never actually
+    waiting on THIS pair's own clearance in the first place, it's stuck on
+    something else entirely, and retreating only the loser forever is
+    futile -- confirmed directly: a robot stopped 3235+ ticks (215+
+    seconds) straight, completely unmoving, was chosen as "winner" every
+    single cycle purely because the human's own count kept resetting
+    (normal IDM behavior: it re-approaches, stops at a safe following
+    distance behind the still-frozen robot, gets retreated again 20s later,
+    repeat) -- 20+ cycles of retreating the human accomplished nothing
+    because the robot was never going to move regardless.
+    """
+    EXTREME_STALL_S = 3 * STALL_TIMEOUT_S
+
+    def retreat_if_safe(vehicle):
+        lon, lat = vehicle.lane.local_coordinates(vehicle.position)
+        others = [np.asarray(v.position) for v in road.vehicles if v is not vehicle]
+        for step_back in np.arange(retreat, 0.5 - 1e-9, -0.5):
+            candidate_lon = max(0.0, lon - step_back)
+            candidate_pos = vehicle.lane.position(candidate_lon, lat)
+            if all(np.linalg.norm(candidate_pos - p) >= retreat_safe_distance for p in others):
+                vehicle.position = candidate_pos
+                return True
+        return False
+
+    actors = [v for v in road.vehicles if getattr(v, "route_points", None) is not None and not v.crashed]
+    for i, a in enumerate(actors):
+        for b in actors[i + 1:]:
+            if a.speed >= 1.0 or b.speed >= 1.0:
+                continue
+            a_ticks, b_ticks = getattr(a, "_stopped_ticks", 0), getattr(b, "_stopped_ticks", 0)
+            if a_ticks * dt < STALL_TIMEOUT_S or b_ticks * dt < STALL_TIMEOUT_S:
+                continue
+            if np.linalg.norm(np.asarray(a.position) - np.asarray(b.position)) >= clear_dist:
+                continue  # already clear -- not what's blocking the existing release logic
+
+            winner, loser = (a, b) if (a_ticks > b_ticks or (a_ticks == b_ticks and id(a) > id(b))) else (b, a)
+            winner_ticks = a_ticks if winner is a else b_ticks
+            moved_loser = retreat_if_safe(loser)
+            if not moved_loser or winner_ticks * dt >= EXTREME_STALL_S:
+                retreat_if_safe(winner)
+
+
+BACKGROUND_STALL_TIMEOUT_S = 25.0  # longer than STALL_TIMEOUT_S -- the human's own unstick gets first say
+
+
+def _unstick_frozen_background(road, dt, timeout_s=BACKGROUND_STALL_TIMEOUT_S):
+    """Background-traffic analogue of _unstick_if_frozen -- same idea, wider
+    net. crossing_conflict_brake's tie-break (scene1_background.py)
+    resolves nearly every standoff, but its own docstring documents a real
+    remaining case it deliberately leaves open for anonymous traffic: two
+    vehicles from different lanes/rings both stopped right at a shared
+    merge point, e.g. mega_scene's roundabout entries once
+    route_adjacent_lane_indexes started biasing spawn density onto the
+    route the human's own path takes THROUGH the roundabout -- exactly
+    where this was actually observed freezing.
+
+    _unstick_if_frozen already prevents this from stranding the human
+    itself, but does nothing for a standoff between two background vehicles
+    that never touches the human at all. This generalizes the same
+    signal -- `_stopped_ticks`, already maintained by
+    apply_better_car_following for crossing_conflict_brake's own tie-break,
+    incremented only while GENUINELY stopped (speed < 1.0) and reset the
+    instant a vehicle moves above that even briefly -- so ordinary
+    stop-and-go congestion (which keeps creeping forward) never accumulates
+    this; only a vehicle that hasn't moved AT ALL for a long time can. On
+    this traffic-light-free map, a vehicle whose front gap ever opened even
+    slightly would show some nonzero IDM creep and reset its own counter,
+    so `timeout_s` straight seconds of exact zero movement is strong
+    evidence of a genuine permanent deadlock, not a long but ordinary queue
+    wait -- same reasoning as _unstick_if_frozen's own STALL_TIMEOUT_S, just
+    applied network-wide instead of only to the human's immediate blocker.
+
+    Never removes a route-following vehicle (route_points is not None --
+    the human or the robot): only anonymous background traffic, exactly
+    like _unstick_if_frozen's own guard against removing one of those.
+
+    Iterates a SNAPSHOT (list(road.vehicles)), not road.vehicles itself --
+    removing from a list while a plain `for` loop walks it shifts every
+    later element back one slot, which the loop's own advancing index then
+    steps past, silently skipping whatever just shifted into the removed
+    slot. Confirmed as a real, not theoretical, failure: with two or more
+    long-stopped vehicles adjacent in road.vehicles (exactly a genuine
+    multi-vehicle jam at a busy junction -- the case this function exists
+    to break), the one right after each removed vehicle could be skipped
+    on every single call, forever, since each call started a fresh
+    iteration that reproduced the same skip. Measured directly: a single
+    seeded vehicle's own _stopped_ticks climbed past 4600 (over 300
+    seconds, 12x the 25s timeout) while parked directly in a turn span's
+    own conflict lane, never once removed, permanently blocking that
+    maneuver for the rest of a whole test run.
+    """
+    for v in list(road.vehicles):
+        if getattr(v, "route_points", None) is not None or v.crashed:
+            continue
+        if getattr(v, "_stopped_ticks", 0) * dt >= timeout_s:
+            road.vehicles.remove(v)
 
 
 def advance_vehicles_with_route(road, lane_indexes):
@@ -410,21 +611,23 @@ def advance_vehicles_with_route(road, lane_indexes):
 
     Call in place of (not in addition to) advance_vehicles().
 
-    A ROUTE-FOLLOWING VEHICLE (route_points is not None, i.e. any
-    LimitedVisionHuman) IS NEVER DESPAWNED, unlike background traffic.
-    Background despawn-at-a-genuine-dead-end is fine for anonymous traffic
-    (scene1_background.py's own advance_vehicles() docstring says as much),
-    but silently deleting the one human this whole feature exists to study
-    is a much worse failure than a vehicle that's temporarily off the map
-    edge -- there is no plausible use of this module where "the human
-    vanished partway through" is an acceptable outcome. When no
-    continuation is found, it simply keeps its current lane_index and
-    retries next step (cheap: this only runs for the human, not the whole
-    background population) -- combined with route_aware_continuation's
-    fallback pulling back toward the route (see that function's docstring),
-    this was sufficient in testing to recover rather than genuinely strand.
+    A ROUTE-FOLLOWING VEHICLE (route_points is not None -- both the human
+    AND a robot: play.py/interface.py/evaluate.py all set robot.route_points
+    directly to opt a robot into route_aware_continuation too, so this is
+    NOT the same set as "LimitedVisionHuman instances") NEVER GETS
+    DESPAWNED AT A DEAD END, unlike background traffic. Background despawn-
+    at-a-genuine-dead-end is fine for anonymous traffic (scene1_background.
+    py's own advance_vehicles() docstring says as much), but silently
+    deleting the human this whole feature exists to study -- or a robot a
+    live participant can see driving around -- is a much worse failure than
+    a vehicle that's temporarily off the map edge. When no continuation is
+    found, it simply keeps its current lane_index and retries next step --
+    combined with route_aware_continuation's fallback pulling back toward
+    the route (see that function's docstring), this was sufficient in
+    testing to recover rather than genuinely strand.
 
-    A CRASHED BACKGROUND VEHICLE (crashed, route_points is None) IS ALWAYS
+    A CRASHED BACKGROUND VEHICLE (crashed, not a LimitedVisionHuman -- see
+    the isinstance check below, not a route_points check) IS ALWAYS
     REMOVED, unlike scene1_background.advance_vehicles() which leaves it in
     place. That's fine on real_001's own multi-lane-equivalent fragment
     graph (a wreck rarely owns the only path forward), but a route-following
@@ -439,7 +642,23 @@ def advance_vehicles_with_route(road, lane_indexes):
     """
     survivors = []
     for v in road.vehicles:
-        if v.crashed and getattr(v, "route_points", None) is None:
+        # Only an actual LimitedVisionHuman is protected from crash-removal
+        # (see this function's own docstring: never despawn/strand the
+        # human this whole module exists to study). A ROBOT also carries
+        # route_points is not None (interface.py/play.py set it directly to
+        # opt into route_aware_continuation), but is not a LimitedVisionHuman
+        # instance, so a crashed one is removed exactly like crashed
+        # background traffic -- confirmed as a genuine, previously-open gap:
+        # a crashed robot sitting in the human's own lane was never removed
+        # by ANY existing mechanism (this check kept it forever regardless
+        # of route_points; _unstick_frozen_background and _unstick_if_frozen
+        # both deliberately never touch a route vehicle; _resolve_stuck_
+        # route_pair explicitly excludes crashed vehicles from its own
+        # actors list) -- so the human was left permanently, unrecoverably
+        # blocked, confirmed directly: progress froze solid at the exact
+        # tick a robot crashed one lane-length ahead of it and never moved
+        # again for the rest of a 20000-step run.
+        if v.crashed and not isinstance(v, LimitedVisionHuman):
             continue
         if sb.off_road(v):
             route_points = getattr(v, "route_points", None)

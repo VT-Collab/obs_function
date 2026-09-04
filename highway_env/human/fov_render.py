@@ -73,14 +73,38 @@ def _extend_point(origin, point, radius):
     return origin + delta * (radius / dist)
 
 
-def _shadow_polygon(origin, corners, radius):
+def _shadow_polygon(origin, corners, radius, pad=0.0):
     """The two corners of a convex quadrilateral that are angularly extreme
     as seen from `origin` bound its silhouette; extending rays through them
-    out to `radius` gives the region it occludes beyond itself."""
+    out to `radius` gives the region it occludes beyond itself.
+
+    `pad` (meters, default 0 -- off) would widen that silhouette outward
+    before casting the shadow, to fully cover a target vehicle whose own
+    body pokes slightly past the blocker's exact silhouette right at the
+    boundary (is_occluded() only checks the target's CENTER point, not its
+    whole body). Tried at 1.5m and reverted: the shadow is the visible
+    proxy for "how big is this blocker", and padding it made an occluder
+    look visibly wider/thicker than the vehicle actually rendered there --
+    a real, everyday-visible mismatch, versus the boundary-sliver case it
+    was fixing, which only shows up for another vehicle sitting almost
+    exactly at the edge of being hidden. Matching the blocker's true
+    silhouette was judged the better tradeoff; pass pad>0 to restore the
+    old behavior if the sliver case turns out to matter more later."""
     rel = np.array([np.arctan2(c[1] - origin[1], c[0] - origin[0]) for c in corners])
     unwrapped = ((rel - rel[0] + np.pi) % (2 * np.pi)) - np.pi
     i_min, i_max = int(np.argmin(unwrapped)), int(np.argmax(unwrapped))
     c_min, c_max = corners[i_min], corners[i_max]
+
+    def _push_outward(point, sign):
+        delta = point - origin
+        dist = np.linalg.norm(delta)
+        if dist < 1e-6:
+            return point
+        tangent = np.array([-delta[1], delta[0]]) / dist  # perpendicular, angle-increasing direction
+        return point + sign * pad * tangent
+
+    c_min = _push_outward(c_min, -1.0)  # push toward smaller angle -> widens the "min" side outward
+    c_max = _push_outward(c_max, 1.0)   # push toward larger angle -> widens the "max" side outward
     far_min = _extend_point(origin, c_min, radius)
     far_max = _extend_point(origin, c_max, radius)
     return [c_min, far_min, far_max, c_max]
@@ -96,7 +120,7 @@ def _cone_polygon(position, heading, fov_deg, radius, segments=CONE_SEGMENTS):
 
 
 def draw_fov_mask(surface, human, candidates, fov_deg, enable_fov, enable_occlusion,
-                   mask_alpha, color=(0, 0, 0), radius=CONE_RADIUS):
+                   mask_alpha, color=(0, 0, 0), radius=CONE_RADIUS, pad=0.0, shadow_reach_factor=10.0):
     """Tint everything the human can't currently see, in world space (so it
     rotates correctly along with the world in chase mode -- call this on
     the SAME buffer that later gets rotated, before the rotation happens).
@@ -105,6 +129,26 @@ def draw_fov_mask(surface, human, candidates, fov_deg, enable_fov, enable_occlus
     tint at moderate alpha (matches steakhouse/misha's BLIND_GREY -- you
     see everything, dimmed where the human can't), play.py passes black at
     full alpha (matches steakhouse/misha's human seat -- genuinely hidden).
+
+    `pad`: see _shadow_polygon's own docstring -- 0 by default, so each
+    shadow matches the occluding vehicle's own true size instead of
+    rendering it as visibly wider/thicker than it actually is.
+
+    `shadow_reach_factor`: each shadow polygon's own far edge is a
+    STRAIGHT chord between two points on the radius-`radius` circle (its
+    two, now-padded, angularly-extreme corners extended outward) -- any
+    chord between two points on a circle sits strictly INSIDE that circle,
+    so that flat edge falls a little short of the light cone's own true
+    (many-segment-sampled, effectively curved) outer boundary. The gap
+    between them is a small but real unshadowed sliver of light right at
+    the rim of the cone, exactly where the shadow should still be covering
+    it. Casting the shadow out to `radius * shadow_reach_factor` instead
+    of just `radius` pushes that same, unavoidably-flat chord far past
+    where the cone itself is even drawn -- nothing rendered depends on the
+    shadow polygon's OWN edge being circular, only on it reaching at least
+    as far as the light cone everywhere, so a generous multiple removes
+    the visible mismatch instead of trying to shape the chord to match an
+    arc it geometrically can't.
     """
     if not enable_fov and not enable_occlusion:
         return  # true ablation: no restriction, nothing to tint
@@ -124,7 +168,7 @@ def draw_fov_mask(surface, human, candidates, fov_deg, enable_fov, enable_occlus
             length = getattr(other, "LENGTH", 5.0)
             width = getattr(other, "WIDTH", 2.0)
             corners = _rect_corners(other.position, other.heading, length, width)
-            shadow_world = _shadow_polygon(human.position, corners, radius)
+            shadow_world = _shadow_polygon(human.position, corners, radius * shadow_reach_factor, pad=pad)
             pygame.draw.polygon(mask, (r, g, b, mask_alpha), [surface.vec2pix(p) for p in shadow_world])
 
     surface.blit(mask, (0, 0))
@@ -144,6 +188,73 @@ def redraw_ego(surface, human, offscreen=True):
     from highway_env.vehicle.graphics import VehicleGraphics  # local import: keeps this module import-light
 
     VehicleGraphics.display(human, surface, offscreen=offscreen)
+
+
+def redraw_partial(surface, human, candidates, fov_deg, enable_fov, enable_occlusion,
+                    radius=CONE_RADIUS, shadow_reach_factor=10.0, offscreen=True):
+    """Redraw each OTHER vehicle's sprite clipped to exactly the part of
+    its own body that's genuinely visible -- fully, partially (straddling
+    the cone's edge, or poking out from behind another vehicle), or not at
+    all -- instead of the previous redraw_visible's all-or-nothing whole-
+    sprite toggle keyed off human.visible_candidates() (a single center-
+    point test that can only say "this whole vehicle is in or out").
+
+    For each `other`: builds a small per-vehicle "keep" alpha mask (cone
+    cutout, then re-hidden behind every OTHER candidate's shadow --
+    deliberately never `other`'s own, which is what fixes the self-shadow
+    issue redraw_visible also fixed, but here as a natural side effect of
+    excluding self rather than an all-or-nothing override), renders
+    `other`'s sprite into a same-sized buffer, multiplies the sprite's
+    alpha by the keep mask's alpha (pygame.BLEND_RGBA_MULT), then blits
+    the result -- so only the genuinely-visible pixels of `other` survive.
+
+    Confined to a small buffer sized to `other`'s own bounding diagonal
+    (not the whole frame) for performance: this runs once per nearby
+    vehicle per frame.
+    """
+    from highway_env.road.graphics import WorldSurface  # local import: keeps this module import-light
+    from highway_env.vehicle.graphics import VehicleGraphics
+
+    for other in candidates:
+        if other is human:
+            continue
+        length = getattr(other, "LENGTH", 5.0)
+        width = getattr(other, "WIDTH", 2.0)
+        diag = float(np.hypot(length, width))
+        half_px = int(surface.pix(diag)) + 6
+        box = half_px * 2
+        if box <= 0:
+            continue
+
+        cx, cy = surface.vec2pix(other.position)
+        buf = WorldSurface((box, box), pygame.SRCALPHA, pygame.Surface((box, box), pygame.SRCALPHA))
+        buf.fill((0, 0, 0, 0))
+        buf.scaling = surface.scaling
+        buf.origin = surface.origin + (np.array([cx, cy]) - half_px) / surface.scaling
+
+        keep = pygame.Surface((box, box), pygame.SRCALPHA)
+        if enable_fov:
+            keep.fill((255, 255, 255, 0))
+            light_world = _cone_polygon(human.position, human.heading, fov_deg, radius)
+            pygame.draw.polygon(keep, (255, 255, 255, 255), [buf.vec2pix(p) for p in light_world])
+        else:
+            keep.fill((255, 255, 255, 255))
+
+        if enable_occlusion:
+            for blocker in candidates:
+                if blocker is other or blocker is human:
+                    continue
+                b_length = getattr(blocker, "LENGTH", 5.0)
+                b_width = getattr(blocker, "WIDTH", 2.0)
+                corners = _rect_corners(blocker.position, blocker.heading, b_length, b_width)
+                shadow_world = _shadow_polygon(human.position, corners, radius * shadow_reach_factor)
+                pygame.draw.polygon(keep, (0, 0, 0, 0), [buf.vec2pix(p) for p in shadow_world])
+
+        sprite_buf = pygame.Surface((box, box), pygame.SRCALPHA)
+        VehicleGraphics.display(other, buf, offscreen=True)
+        sprite_buf.blit(buf, (0, 0))
+        sprite_buf.blit(keep, (0, 0), special_flags=pygame.BLEND_RGBA_MULT)
+        surface.blit(sprite_buf, (cx - half_px, cy - half_px))
 
 
 def draw_debug_lines(surface, human, visible_ids, candidates):
@@ -182,3 +293,26 @@ def render_chase_frame(buf, human, window_size, anchor, bg_color):
     frame.fill(bg_color)
     frame.blit(rotated, (anchor[0] - rw / 2.0, anchor[1] - rh / 2.0))
     return frame
+
+
+def chase_screen_pos(human, world_pos, scale, anchor):
+    """Where `world_pos` ends up on the FINAL chase-camera frame (the
+    thing render_chase_frame returns), without tracing back through
+    chase_camera_buffer's own buf.vec2pix + pygame.transform.rotate's own
+    pixel math (whose rotation-direction convention isn't worth depending
+    on here). Derived straight from what the chase camera is DEFINED to
+    do: the human always sits exactly at `anchor`, and human.heading
+    always points to screen-up. Solve for the one rotation phi that sends
+    the human's own world heading vector to screen-up (0, -1) in pygame's
+    x-right/y-down convention -- phi = -pi/2 - human.heading -- and apply
+    that same rotation to any other point's own offset from the human.
+    Verified algebraically: world_pos = human.position maps to exactly
+    `anchor` (rel=0), and a point straight ahead of the human maps to
+    directly above anchor on screen, both required by the camera's own
+    definition."""
+    phi = -np.pi / 2.0 - human.heading
+    cos_p, sin_p = np.cos(phi), np.sin(phi)
+    rel = np.asarray(world_pos, dtype=float) - np.asarray(human.position, dtype=float)
+    rx = cos_p * rel[0] - sin_p * rel[1]
+    ry = sin_p * rel[0] + cos_p * rel[1]
+    return anchor[0] + scale * rx, anchor[1] + scale * ry

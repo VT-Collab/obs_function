@@ -48,7 +48,7 @@ import display_all as d  # noqa: E402
 from highway_env.road.graphics import RoadGraphics, WorldSurface  # noqa: E402
 from highway_env.vehicle.behavior import IDMVehicle  # noqa: E402
 
-SCENE = "mega_scene"
+SCENE = "real_001_rebuilt"
 
 
 class NoResnapIDMVehicle(IDMVehicle):
@@ -98,16 +98,50 @@ def find_continuation(road, lane_indexes, vehicle, max_dist=8.0, max_heading_dif
     'the next fragment of the same road is a different lane index', not
     'actually off real road'. Restricting to a heading match keeps this
     from grabbing an unrelated crossing lane that just happens to start
-    nearby (a real intersection has several of those)."""
+    nearby (a real intersection has several of those).
+
+    Caches each lane's own (position(0,0), heading_at(0)) on `road` itself
+    (road._continuation_geom_cache) the first time this runs for a given
+    road, instead of recomputing it from every one of ~115 lane fragments
+    on every call. Lane GEOMETRY is fixed once a road is built (only which
+    vehicles sit on it changes tick to tick), so that recomputation was
+    pure waste -- confirmed as the single largest per-tick cost in a real
+    profiling run: on this real map's short (~20-40m) fragments, nearly
+    every vehicle sits within find_front_vehicle's own 30m lookahead on
+    nearly every tick, so this ran roughly once per vehicle per tick, each
+    doing a full ~115-lane linear scan -- 2.6 million np.linalg.norm calls
+    across just 200 ticks with ~43 vehicles, directly behind reports of
+    the whole simulation running in jittery slow motion in the actual
+    interactive interface (a fixed per-tick sim dt with no real-time
+    catch-up means any tick this expensive makes the WHOLE scene lag).
+
+    Attached to `road` (not a module-level dict keyed by id()) specifically
+    because `road` is the one object here guaranteed to live exactly as
+    long as the geometry it's caching stays valid -- a module-level
+    id()-keyed cache would risk a stale hit if an old road gets garbage
+    collected and Python reuses its memory address for an unrelated new
+    one, a real risk here since this codebase's own test harnesses build
+    many road instances in a loop within one process.
+    """
+    cache = getattr(road, "_continuation_geom_cache", None)
+    if cache is None:
+        cache = {}
+        road._continuation_geom_cache = cache
+
     best_idx, best_d = None, max_dist
     for idx in lane_indexes:
         if idx == vehicle.lane_index:
             continue
-        lane = road.network.get_lane(idx)
-        d = np.linalg.norm(lane.position(0, 0) - vehicle.position)
+        geom = cache.get(idx)
+        if geom is None:
+            lane = road.network.get_lane(idx)
+            geom = (lane.position(0, 0), lane.heading_at(0))
+            cache[idx] = geom
+        start_pos, start_heading = geom
+        d = np.linalg.norm(start_pos - vehicle.position)
         if d >= best_d:
             continue
-        heading_diff = abs((np.degrees(lane.heading_at(0) - vehicle.heading) + 180) % 360 - 180)
+        heading_diff = abs((np.degrees(start_heading - vehicle.heading) + 180) % 360 - 180)
         if heading_diff > max_heading_diff_deg:
             continue
         best_idx, best_d = idx, d
@@ -383,6 +417,52 @@ def crossing_conflict_brake(vehicle, candidates, heads=frozenset(), danger_dist=
     return result
 
 
+def vehicle_status_label(road, vehicle, lane_indexes, radius=35.0, stopped_threshold=0.5):
+    """Short debug string describing WHY `vehicle` is currently behaving as
+    it is -- for an on-screen debug overlay (watch.py's --debug-status),
+    never consulted by any actual driving decision. Re-derives its answer
+    from the exact same checks find_front_vehicle/crossing_conflict_brake/
+    off_road/find_continuation already make internally, so what's on
+    screen is guaranteed to match what the vehicle is actually reacting to
+    -- not a separate, potentially-drifting heuristic.
+
+    Returns None while `vehicle` is moving above `stopped_threshold` (no
+    label needed -- ordinary driving isn't a debugging question), else one
+    of "CRASHED", "END OF ROAD", "SAME LANE <Nm>" (find_front_vehicle: a
+    real leader close ahead in vehicle's OWN lane -- ordinary car-
+    following, same direction of travel, ends the instant that leader
+    moves), "CROSS TRAFFIC" (crossing_conflict_brake: someone on a
+    GENUINELY DIFFERENT heading whose own path crosses this vehicle's,
+    e.g. another approach at a junction -- a different category of hazard
+    from a same-lane leader even though both look like "stopped, blocked
+    by something" from outside), or "STOPPED" (neither matched -- e.g.
+    still accelerating from a stop, or blocked by something further up a
+    chain this single-vehicle check doesn't trace).
+    """
+    if vehicle.crashed:
+        return "CRASHED"
+    if vehicle.speed >= stopped_threshold:
+        return None
+
+    candidates = nearby_vehicles(road, vehicle, radius)
+    front = find_front_vehicle(road, vehicle, lane_indexes, candidates)
+
+    if off_road(vehicle) and find_continuation(road, lane_indexes, vehicle) is None:
+        return "END OF ROAD"
+    if front is not None:
+        gap = float(np.linalg.norm(np.asarray(front.position) - np.asarray(vehicle.position)))
+        return f"SAME LANE {gap:.0f}m"
+
+    heads = {id(o) for o in candidates
+             if find_front_vehicle(road, o, lane_indexes, nearby_vehicles(road, o, radius)) is None}
+    if front is None:
+        heads.add(id(vehicle))
+    if crossing_conflict_brake(vehicle, candidates, heads=heads) is not None:
+        return "CROSS TRAFFIC"
+
+    return "STOPPED"
+
+
 def apply_better_car_following(road, lane_indexes, dt, radius=35.0):
     """Recompute each vehicle's acceleration using find_front_vehicle() and
     crossing_conflict_brake() instead of whatever road.act() (via
@@ -470,7 +550,8 @@ def advance_vehicles(road, lane_indexes):
     road.vehicles = survivors
 
 
-def add_background_traffic(road, count=100, seed=0, speed_range=(8.0, 14.0), safe_distance=10.0, max_tries=20):
+def add_background_traffic(road, count=100, seed=0, speed_range=(8.0, 14.0), safe_distance=10.0, max_tries=20,
+                            lane_indexes=None):
     """Spawn up to `count` IDMVehicle, each on a random real lane at a
     random position -- but never on top of / overlapping a vehicle already
     placed, OR any vehicle already on `road` before this call (e.g. a
@@ -484,9 +565,17 @@ def add_background_traffic(road, count=100, seed=0, speed_range=(8.0, 14.0), saf
     than spawned into a guaranteed collision -- so `count` is an upper
     bound, not a guarantee, once the road is dense enough that safe spots
     run out.
+
+    lane_indexes: candidate lanes to spawn on (default: every lane in the
+    network, the original behavior). Pass a restricted list -- e.g.
+    mega_scene.route_adjacent_lane_indexes() -- to bias density toward
+    where a route-following vehicle actually drives instead of spreading it
+    uniformly over lanes it may never visit (a small synthetic network has
+    a much higher fraction of those, e.g. a roundabout's own unused stub
+    arms, than a large real recorded map does).
     """
     rng = np.random.default_rng(seed)
-    lane_indexes = all_lane_indexes(road)
+    lane_indexes = lane_indexes if lane_indexes is not None else all_lane_indexes(road)
     placed = [v.position for v in road.vehicles]
     for _ in range(count):
         for _ in range(max_tries):
@@ -558,6 +647,7 @@ def main():
 
         surface.fill(surface.GREY)
         RoadGraphics.display(road, surface)
+        d.draw_lane_arrows(surface, road)
         RoadGraphics.display_traffic(road, surface, simulation_frequency=round(1 / args.dt), offscreen=True)
         if human_route:
             d.draw_routes(surface, road, human_route, [d.HUMAN_COLOR], -d.ROUTE_LATERAL_OFFSET, SCENE, "human")
