@@ -21,6 +21,36 @@ def exit_far(net, prefix, corner, lane_i=0):
     return np.array(lane.position(lane.length, 0)), lane.heading_at(lane.length)
 
 
+def exit_far_center(net, prefix, corner, lane_i, lane_width):
+    """Like exit_far, but returns the junction's own TRUE CENTERLINE far
+    point/heading -- lane_i's own turn_lat lateral offset (lane_width/2 +
+    lane_i*lane_width, add_four_way/add_three_way's own convention)
+    undone, not that lane's own point.
+
+    Use this, not exit_far directly, whenever the result places a
+    DOWNSTREAM primitive's own center (round_about's own `center`,
+    add_four_way/add_three_way's own via center_ahead_corner) -- anything
+    placed straight off exit_far's own lane-specific point inherits THAT
+    lane's own lateral offset as a hidden shift in the whole downstream
+    structure's own axis. Verified directly: querying lane 0 vs lane 1
+    from the same exit gives points differing by EXACTLY (turn_lat(1)-
+    turn_lat(0))*lateral with zero along-heading component, i.e. a pure
+    lateral offset -- so subtracting lane_i's own turn_lat*lateral here
+    recovers the same true center point regardless of which lane_i was
+    queried, and every lane bridged afterward (bridge_corners/
+    bridge_roundabout with n>1) lands exactly parallel, not at a
+    compounding diagonal "twist" only visible once more than one lane
+    bridges in parallel (a single asymmetric bridge can silently absorb
+    the same misalignment as one line's own angle, which is why this
+    stayed invisible until n>1 bridging existed).
+    """
+    far, heading = exit_far(net, prefix, corner, lane_i)
+    turn_lat = lane_width / 2 + lane_i * lane_width
+    direction = np.array([np.cos(heading), np.sin(heading)])
+    lateral = np.array([-direction[1], direction[0]])
+    return far - turn_lat * lateral, heading
+
+
 def bridge(net, from_node, to_node, p1, p2, line_types=(_C, _C)):
     """A short raw StraightLane connecting two build_scene-built junctions
     -- the same bridging mega_scene.py uses between its own primitives.
@@ -92,7 +122,7 @@ def bridge_corners(net, prefix_a, corner_a, prefix_b, corner_b, n):
                line_types=(edge_left, edge_right))
 
 
-def bridge_roundabout(net, ra_prefix, gap_k, j_prefix, corner, j_lane_i=0, ra_lane_i=0):
+def bridge_roundabout(net, ra_prefix, gap_k, j_prefix, corner, j_lane_i=0, ra_lane_i=0, n=1):
     """Bridge a roundabout's gap k to a junction's corner arm, in BOTH
     directions: the junction's own exit feeding the roundabout's entry at
     that gap, and the roundabout's own exit at that SAME gap feeding back
@@ -103,10 +133,25 @@ def bridge_roundabout(net, ra_prefix, gap_k, j_prefix, corner, j_lane_i=0, ra_la
     so leaving the return direction unbridged is a real dead end for any
     background vehicle that takes it, not merely a missing decoration.
 
-    j_lane_i/ra_lane_i: the junction's own lane index and the roundabout's
-    own lane index at this gap -- separate parameters because a route
-    riding a junction's lane 1 into a single-lane (ra_lane_i=0) roundabout
-    is the common case here, not j_lane_i == ra_lane_i.
+    j_lane_i/ra_lane_i: the junction's own STARTING lane index and the
+    roundabout's own STARTING lane index at this gap -- separate
+    parameters (not one shared index) because a route riding a junction's
+    lane 1 into a single-lane (ra_lane_i=0) roundabout is a real, common
+    case, not j_lane_i == ra_lane_i.
+
+    n: how many consecutive lane pairs to bridge -- (j_lane_i+i, ra_lane_i
+    +i) for i in range(n). n=1 (default) is a single lane pair with plain
+    bridge()'s own default line_types (both edges solid): the genuine-
+    narrowing case (see bridge_corners' own docstring on why a plain
+    bridge() there is correct, not a bug, when a connector primitive
+    actually drops a lane -- the same reasoning applies to a roundabout
+    with fewer lanes than the junction it meets). Pass n>1 when the
+    roundabout and the junction carry the SAME lane count at this gap --
+    no narrowing at all -- to bridge every lane 1:1 the way bridge_corners
+    does between two junctions, using that same per-lane line_types
+    convention (inner lanes striped both sides, only the outermost lane's
+    own outer edge solid) instead of every lane getting a redundant solid
+    edge on its inner side too.
 
     Only call this where the far side is a real junction with its own
     approach/exit pair. A merge's own "a" node has no such reverse lane at
@@ -114,17 +159,24 @@ def bridge_roundabout(net, ra_prefix, gap_k, j_prefix, corner, j_lane_i=0, ra_la
     docstring) -- so bridging a roundabout's return direction into one
     isn't meaningful; leave that connection as a single bridge() call.
     """
-    j_far = net.get_lane((f"{j_prefix}il{corner}_{j_lane_i}", f"{j_prefix}o{corner}_{j_lane_i}", 0))
-    j_far_pos = j_far.position(j_far.length, 0)
-    ra_in = net.get_lane((f"{ra_prefix}farin{gap_k}_{ra_lane_i}", f"{ra_prefix}bendin{gap_k}_{ra_lane_i}", 0))
-    ra_in_pos = ra_in.position(0, 0)
-    bridge(net, f"{j_prefix}o{corner}_{j_lane_i}", f"{ra_prefix}farin{gap_k}_{ra_lane_i}", j_far_pos, ra_in_pos)
+    for i in range(n):
+        jl, ral = j_lane_i + i, ra_lane_i + i
+        edge_types = ((_C, _C),) if n == 1 else ((_S, (_C if i == n - 1 else _S)),)
+        edge_left, edge_right = edge_types[0]
 
-    ra_out = net.get_lane((f"{ra_prefix}bendout{gap_k}_{ra_lane_i}", f"{ra_prefix}farout{gap_k}_{ra_lane_i}", 0))
-    ra_out_pos = ra_out.position(ra_out.length, 0)
-    j_near = net.get_lane((f"{j_prefix}o{corner}_{j_lane_i}", f"{j_prefix}ir{corner}_{j_lane_i}", 0))
-    j_near_pos = j_near.position(0, 0)
-    bridge(net, f"{ra_prefix}farout{gap_k}_{ra_lane_i}", f"{j_prefix}o{corner}_{j_lane_i}", ra_out_pos, j_near_pos)
+        j_far = net.get_lane((f"{j_prefix}il{corner}_{jl}", f"{j_prefix}o{corner}_{jl}", 0))
+        j_far_pos = j_far.position(j_far.length, 0)
+        ra_in = net.get_lane((f"{ra_prefix}farin{gap_k}_{ral}", f"{ra_prefix}bendin{gap_k}_{ral}", 0))
+        ra_in_pos = ra_in.position(0, 0)
+        bridge(net, f"{j_prefix}o{corner}_{jl}", f"{ra_prefix}farin{gap_k}_{ral}", j_far_pos, ra_in_pos,
+               line_types=(edge_left, edge_right))
+
+        ra_out = net.get_lane((f"{ra_prefix}bendout{gap_k}_{ral}", f"{ra_prefix}farout{gap_k}_{ral}", 0))
+        ra_out_pos = ra_out.position(ra_out.length, 0)
+        j_near = net.get_lane((f"{j_prefix}o{corner}_{jl}", f"{j_prefix}ir{corner}_{jl}", 0))
+        j_near_pos = j_near.position(0, 0)
+        bridge(net, f"{ra_prefix}farout{gap_k}_{ral}", f"{j_prefix}o{corner}_{jl}", ra_out_pos, j_near_pos,
+               line_types=(edge_left, edge_right))
 
 
 def lane_change(net, from_node, to_node, p0, heading_rad, shift, length, lane_width, line_types=(_N, _N)):

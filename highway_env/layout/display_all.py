@@ -65,9 +65,9 @@ LABEL = (235, 235, 235)
 LABEL_H = 22
 BBOX_MARGIN = 1.15  # fraction of headroom around a road's bounding box
 
-HUMAN_COLOR = (90, 170, 255)
-ROBOT_COLOR = (255, 150, 60)
-ROBOT_PALETTE = [(255, 150, 60), (230, 70, 70), (190, 110, 255), (255, 215, 70), (90, 220, 150)]
+HUMAN_COLOR = (230, 30, 30)
+ROBOT_COLOR = (30, 100, 230)
+ROBOT_PALETTE = [(30, 100, 230), (230, 70, 70), (190, 110, 255), (255, 215, 70), (90, 220, 150)]
 ROUTE_LATERAL_OFFSET = 0.6  # m, so two routes sharing one lane render as parallel tracks
 ROUTE_WIDTH = 3  # px
 ROUTE_START_COLOR = (60, 230, 90)  # green marker at a route's first point
@@ -231,7 +231,7 @@ def draw_bg_lanes(surface, road, lane_indexes, name: str):
             pygame.draw.lines(surface, BG_LANE_COLOR, False, pixels, max(surface.pix(0.15), BG_LANE_WIDTH))
 
 
-def draw_lane_arrows(surface, road):
+def draw_lane_arrows(surface, road, exclude=frozenset()):
     """One small triangular arrow at the midpoint of EVERY lane in the
     network (every (from, to, lane_id) edge, not just the human/robot's
     own route or the background-eligible subset draw_bg_lanes covers),
@@ -246,10 +246,19 @@ def draw_lane_arrows(surface, road):
     enough that showing only the midpoint heading could be mistaken for
     the whole lane being straight, which for how this codebase's own
     curves are used isn't a real risk.
+
+    exclude: optional set of (from_node, to_node, lane_id) keys to skip --
+    for a lane that's real geometry (still drawn by RoadGraphics.display)
+    but not part of whatever route is currently being illustrated, where
+    its own arrow would read as a stray, unexplained direction. Empty by
+    default, so every other caller (play.py, watch.py,
+    scene1_background.py) is unaffected.
     """
     for from_node, tos in road.network.graph.items():
         for to_node, lanes in tos.items():
-            for lane in lanes:
+            for lane_id, lane in enumerate(lanes):
+                if (from_node, to_node, lane_id) in exclude:
+                    continue
                 if lane.length < ARROW_MIN_LANE_LENGTH:
                     continue
                 s = lane.length / 2
