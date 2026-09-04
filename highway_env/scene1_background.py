@@ -90,6 +90,195 @@ def all_lane_indexes(road):
             for t, lanes in tos.items() for i in range(len(lanes))]
 
 
+def _lane_successors(road):
+    """{lane_index: {lane_indexes that continue directly from its own 'to'
+    node}} -- plain one-hop graph adjacency, cached on `road` (same pattern
+    as find_continuation's own _continuation_geom_cache: lane GEOMETRY/
+    TOPOLOGY is fixed once a road is built, only which vehicles sit on it
+    changes tick to tick, so this is worth computing once, not per call)."""
+    cache = getattr(road, "_lane_successors_cache", None)
+    if cache is not None:
+        return cache
+    succ = {}
+    for f, tos in road.network.graph.items():
+        for t, lanes in tos.items():
+            for i in range(len(lanes)):
+                s = set()
+                for t2, lanes2 in road.network.graph.get(t, {}).items():
+                    for j in range(len(lanes2)):
+                        s.add((t, t2, j))
+                succ[(f, t, i)] = s
+    road._lane_successors_cache = succ
+    return succ
+
+
+def _lane_predecessors(road):
+    """{lane_index: {lane_indexes that lead directly INTO its own 'from'
+    node}} -- the reverse of _lane_successors, same caching pattern."""
+    cache = getattr(road, "_lane_predecessors_cache", None)
+    if cache is not None:
+        return cache
+    pred = {idx: set() for idx in _lane_successors(road)}
+    for a, succs in _lane_successors(road).items():
+        for b in succs:
+            pred.setdefault(b, set()).add(a)
+    road._lane_predecessors_cache = pred
+    return pred
+
+
+def _walk_back(road, lane_index, lon, distance):
+    """(lane_index, lon) reached by walking `distance` meters BACKWARD
+    along the lane graph from (lane_index, lon) -- hopping onto a
+    predecessor lane (arbitrarily the first one found, by construction;
+    good enough for a bounded, best-effort retreat, not a claim that it's
+    the "right" branch at a real fork) once the walk would go past the
+    CURRENT lane's own start, instead of clamping at lon=0 and staying
+    there.
+
+    Without this, _retreat_if_safe's own backward search silently wastes
+    most of a long `retreat` distance the moment the vehicle happens to
+    be on a short lane (common here -- a turn arc or a GAP=12m bridge is
+    often well under 12m): every candidate `step_back` past that point
+    clips to the exact same lon=0 position, so trying a LARGER retreat
+    distance changes nothing, confirmed directly (retreat=12 -> 40
+    produced almost no improvement in success rate on a dense scene).
+    Walking across the lane boundary instead genuinely reaches further
+    back in real space.
+
+    Stops (returns lon=0 on whichever lane it's on) if it runs out of
+    predecessors before covering the full distance -- a genuine network
+    dead-end behind the vehicle, not a bug to route around further.
+    """
+    pred = _lane_predecessors(road)
+    remaining = distance
+    idx = lane_index
+    cur_lon = lon
+    while remaining > cur_lon:
+        remaining -= cur_lon
+        preds = pred.get(idx)
+        if not preds:
+            return idx, 0.0
+        idx = next(iter(preds))
+        cur_lon = road.network.get_lane(idx).length
+    return idx, cur_lon - remaining
+
+
+def _orient(a, b, c):
+    return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+
+
+def _on_segment(a, b, c, tol=1e-6):
+    return (min(a[0], b[0]) - tol <= c[0] <= max(a[0], b[0]) + tol
+            and min(a[1], b[1]) - tol <= c[1] <= max(a[1], b[1]) + tol)
+
+
+def _segments_intersect(p1, p2, p3, p4, tol=1e-6):
+    """True if 2D segments p1-p2 and p3-p4 share a point, endpoints
+    included -- a standard orientation test for a genuine crossing, plus
+    an explicit colinear/touching check so two paths that MEET exactly at
+    a shared endpoint (e.g. a real merge point, where two lanes' own
+    centerlines end at the identical physical position) count too, not
+    just an X-shaped crossing in the middle."""
+    d1, d2 = _orient(p3, p4, p1), _orient(p3, p4, p2)
+    d3, d4 = _orient(p1, p2, p3), _orient(p1, p2, p4)
+    if ((d1 > tol) != (d2 > tol)) and ((d3 > tol) != (d4 > tol)) and \
+       (abs(d1) > tol or abs(d2) > tol) and (abs(d3) > tol or abs(d4) > tol):
+        return True
+    if abs(d1) <= tol and _on_segment(p3, p4, p1, tol):
+        return True
+    if abs(d2) <= tol and _on_segment(p3, p4, p2, tol):
+        return True
+    if abs(d3) <= tol and _on_segment(p1, p2, p3, tol):
+        return True
+    if abs(d4) <= tol and _on_segment(p1, p2, p4, tol):
+        return True
+    return False
+
+
+def lane_conflict_table(road, sample_step=1.0):
+    """{lane_index: {other lane_indexes whose own path GEOMETRICALLY
+    crosses or merges with this one}} -- a real, static fact about the
+    network's own topology (every junction/roundabout/merge here is built
+    from a known, finite set of primitives -- add_four_way, add_three_way,
+    round_about, merge -- so every crossing/merging conflict between any
+    two lanes is fully determined by their own fixed geometry, computable
+    once, not re-guessed every tick from live heading/position).
+
+    Replaces a live heading-difference heuristic (a car turning right
+    counted an unrelated car going straight on a DIFFERENT, non-crossing
+    lane as a same-ish-heading-passing-close-by "conflict" purely because
+    their instantaneous headings and lateral offsets happened to line up
+    near the junction, not because their actual PATHS ever cross) with an
+    exact question: do these two lanes' own centerlines ever occupy the
+    same point in space. Two lane pairs are deliberately excluded from
+    that test, both real, both confirmed to otherwise produce false
+    positives:
+
+      1. Directly graph-adjacent pairs (one is the other's own successor,
+         sharing 'a is right in front of b' via a common node) -- that's
+         find_front_vehicle's own job (car ahead on MY OWN path), not a
+         crossing hazard between two DIFFERENT paths.
+      2. Two lanes that share the same 'from' node (a fork: both start at
+         the identical physical point, e.g. a straight and a turn option
+         leaving the same approach) -- sharing a START point isn't a
+         hazard, they're diverging AWAY from each other from there; only
+         skips comparing their own very first sampled segment (still
+         index >= 1 onward), so a genuine later re-crossing between two
+         lanes that happen to also share a start is still caught.
+
+    A shared 'to' node (two lanes CONVERGING to the same physical point --
+    a real merge) is deliberately NOT excluded: that endpoint touch IS the
+    conflict, the same way a crossing point in the middle of two lanes is.
+
+    Cached on `road` (same pattern as find_continuation's own geometry
+    cache) -- O(lanes^2 * samples^2) worst case, but a bounding-box reject
+    per pair keeps this fast in practice, and it only ever runs once per
+    road, not per tick.
+    """
+    cache = getattr(road, "_lane_conflict_table", None)
+    if cache is not None:
+        return cache
+
+    indexes = all_lane_indexes(road)
+    successors = _lane_successors(road)
+    polylines = {}
+    for idx in indexes:
+        lane = road.network.get_lane(idx)
+        n = max(2, int(lane.length / sample_step) + 1)
+        polylines[idx] = [np.asarray(lane.position(s, 0)) for s in np.linspace(0, lane.length, n)]
+
+    conflicts = {idx: set() for idx in indexes}
+    for ai in range(len(indexes)):
+        a = indexes[ai]
+        pa = polylines[a]
+        ax = [p[0] for p in pa]
+        ay = [p[1] for p in pa]
+        for bi in range(ai + 1, len(indexes)):
+            b = indexes[bi]
+            if b in successors.get(a, ()) or a in successors.get(b, ()):
+                continue
+            pb = polylines[b]
+            bx = [p[0] for p in pb]
+            by = [p[1] for p in pb]
+            if max(ax) < min(bx) or min(ax) > max(bx) or max(ay) < min(by) or min(ay) > max(by):
+                continue
+            shared_start = a[0] == b[0]
+            hit = False
+            for i in range(1 if shared_start else 0, len(pa) - 1):
+                for j in range(1 if shared_start else 0, len(pb) - 1):
+                    if _segments_intersect(pa[i], pa[i + 1], pb[j], pb[j + 1]):
+                        hit = True
+                        break
+                if hit:
+                    break
+            if hit:
+                conflicts[a].add(b)
+                conflicts[b].add(a)
+
+    road._lane_conflict_table = conflicts
+    return conflicts
+
+
 def find_continuation(road, lane_indexes, vehicle, max_dist=8.0, max_heading_diff_deg=60.0):
     """A lane fragment whose start sits near the vehicle's current position
     and continues in roughly its current heading -- the real map chops one
@@ -202,26 +391,31 @@ def find_front_vehicle(road, vehicle, lane_indexes, candidates, lookahead=30.0, 
     return best
 
 
-def crossing_conflict_brake(vehicle, candidates, heads=frozenset(), danger_dist=22.0, lateral_tol=6.0,
-                             heading_threshold_deg=40.0, stopped_threshold=1.0,
-                             safe_release_dist=10.0):
-    """A harder brake for a genuine crossing conflict, using ONLY current
-    state -- no simulated future path. IDM itself never predicts anything;
-    it reacts to the current gap and relative velocity to whatever's
-    currently in front. This stays true to that: same idea as
+def crossing_conflict_brake(road, vehicle, candidates, heads=frozenset(), danger_dist=22.0, lateral_tol=6.0,
+                             stopped_threshold=1.0, safe_release_dist=10.0):
+    """A harder brake for a genuine crossing conflict. WHICH pairs of
+    vehicles even get checked is decided by lane_conflict_table (see its
+    own docstring) -- a real, precomputed structural fact about whether
+    `other`'s own lane ever geometrically crosses or merges with
+    `vehicle`'s own lane at all, replacing an earlier live heading-
+    difference/lateral-tolerance heuristic that had no notion of which
+    lanes actually intersect (a car turning right and a car on a
+    different, non-crossing lane could satisfy it by coincidence near a
+    junction). WHETHER the two are close enough RIGHT NOW to matter is
+    still purely instantaneous, no simulated future path -- IDM itself
+    never predicts anything either, it reacts to the current gap and
+    relative velocity to whatever's currently in front. Same idea as
     find_front_vehicle (project a vehicle's CURRENT position onto a lane
     and check the CURRENT gap/lateral offset), just checked in both
-    directions and with a wider lateral tolerance, so a crossing vehicle
-    at a steep angle is flagged with more margin instead of only once
-    it's nearly on top of ego.
+    directions.
 
-    Checks two things, both purely instantaneous:
+    Checks two things, both purely instantaneous, for every candidate
+    lane_conflict_table already says CAN conflict:
       1. other's current position projected onto ego's own lane (a
          crossing vehicle sitting close to ego's path right now).
       2. ego's current position projected onto other's lane (the
          symmetric case: ego is close to entering a path other already
-         occupies), for a genuinely different-heading `other` only --
-         same-direction traffic is already covered by find_front_vehicle.
+         occupies).
     Returns a hard deceleration if either check trips within
     `danger_dist`/`lateral_tol`, else None -- EXCEPT for the tie-break
     below, which can release a vehicle from an otherwise-tripped check.
@@ -360,25 +554,27 @@ def crossing_conflict_brake(vehicle, candidates, heads=frozenset(), danger_dist=
         s0, _ = vehicle.lane.local_coordinates(vehicle.position)
     except Exception:
         return None
+    my_conflicts = lane_conflict_table(road).get(vehicle.lane_index, ())
     result = None
     for other in candidates:
         if other.crashed:
             continue
-        heading_diff = abs((np.degrees(other.heading - vehicle.heading) + 180) % 360 - 180)
-        if heading_diff < heading_threshold_deg or heading_diff > 180 - heading_threshold_deg:
-            # Same-ish direction (~0 deg) -- find_front_vehicle/IDM already
-            # covers this. Opposite direction (~180 deg) is oncoming traffic
-            # in a parallel lane of the same road, not a crossing path -- at
-            # typical lane spacing (~3-4m) it sits comfortably inside
-            # lateral_tol just from safely passing by, which was making
-            # ordinary two-way-road traffic trip this "conflict" constantly
-            # (confirmed by tracing a global gridlock down to exactly this:
-            # nearly every "conflict" candidate on a stuck vehicle had a
-            # heading_diff near 180, i.e. oncoming, not near 90). A real
-            # head-on/unprotected-turn conflict still gets caught here
-            # because it isn't purely antiparallel -- the paths are
-            # actually converging, which shows up as a heading_diff well
-            # short of 180.
+        if other.lane_index not in my_conflicts:
+            # lane_conflict_table (see its own docstring) is a real,
+            # precomputed structural fact: does `other`'s own lane ever
+            # geometrically cross or merge with `vehicle`'s own lane at
+            # all, anywhere -- not a live heading/distance guess. Same-ish
+            # direction traffic (find_front_vehicle/IDM's own job) and
+            # oncoming traffic in a parallel lane both correctly have no
+            # entry here (their lanes run alongside, never crossing), same
+            # as the heading-difference heuristic this replaced was
+            # trying to approximate -- but exactly, from the network's own
+            # geometry, instead of guessing from instantaneous heading and
+            # lateral offset (which a car turning right and a car going
+            # straight on a DIFFERENT, non-crossing lane could satisfy by
+            # coincidence near a junction even though their actual paths
+            # never intersect -- confirmed the source of false positives
+            # this table exists to remove).
             continue
 
         conflict = False
@@ -437,10 +633,19 @@ def vehicle_status_label(road, vehicle, lane_indexes, radius=35.0, stopped_thres
     from a same-lane leader even though both look like "stopped, blocked
     by something" from outside), or "STOPPED" (neither matched -- e.g.
     still accelerating from a stop, or blocked by something further up a
-    chain this single-vehicle check doesn't trace).
+    chain this single-vehicle check doesn't trace) -- each suffixed with
+    `vehicle.lane_index` itself (the exact (from, to, lane_id) tuple the
+    vehicle's own driving logic currently believes it's on -- the same
+    value find_front_vehicle/off_road/etc. above all read), so a lane-
+    transition bug (vehicle visibly on one physical lane, .lane_index
+    still pointing at a different one) shows up directly on screen instead
+    of only being discoverable by print-debugging separately.
     """
+    lane_str = f"{vehicle.lane_index[0]}->{vehicle.lane_index[1]}#{vehicle.lane_index[2]}" \
+        if getattr(vehicle, "lane_index", None) is not None else "no lane_index"
+
     if vehicle.crashed:
-        return "CRASHED"
+        return f"CRASHED [{lane_str}]"
     if vehicle.speed >= stopped_threshold:
         return None
 
@@ -448,19 +653,19 @@ def vehicle_status_label(road, vehicle, lane_indexes, radius=35.0, stopped_thres
     front = find_front_vehicle(road, vehicle, lane_indexes, candidates)
 
     if off_road(vehicle) and find_continuation(road, lane_indexes, vehicle) is None:
-        return "END OF ROAD"
+        return f"END OF ROAD [{lane_str}]"
     if front is not None:
         gap = float(np.linalg.norm(np.asarray(front.position) - np.asarray(vehicle.position)))
-        return f"SAME LANE {gap:.0f}m"
+        return f"SAME LANE {gap:.0f}m [{lane_str}]"
 
     heads = {id(o) for o in candidates
              if find_front_vehicle(road, o, lane_indexes, nearby_vehicles(road, o, radius)) is None}
     if front is None:
         heads.add(id(vehicle))
-    if crossing_conflict_brake(vehicle, candidates, heads=heads) is not None:
-        return "CROSS TRAFFIC"
+    if crossing_conflict_brake(road, vehicle, candidates, heads=heads) is not None:
+        return f"CROSS TRAFFIC [{lane_str}]"
 
-    return "STOPPED"
+    return f"STOPPED [{lane_str}]"
 
 
 def apply_better_car_following(road, lane_indexes, dt, radius=35.0):
@@ -514,7 +719,7 @@ def apply_better_car_following(road, lane_indexes, dt, radius=35.0):
                 v.action.get("acceleration", 0.0),
                 v.acceleration(ego_vehicle=v, front_vehicle=front, rear_vehicle=None),
             )
-        conflict_override = crossing_conflict_brake(v, candidates, heads=heads)
+        conflict_override = crossing_conflict_brake(road, v, candidates, heads=heads)
         if conflict_override is not None:
             v.action["acceleration"] = min(v.action.get("acceleration", 0.0), conflict_override)
 
@@ -548,6 +753,143 @@ def advance_vehicles(road, lane_indexes):
             v.target_lane_index = next_idx
         survivors.append(v)
     road.vehicles = survivors
+
+
+def _retreat_if_safe(road, vehicle, retreat=12.0, retreat_safe_distance=7.0, retreat_step=0.5,
+                      moving_safe_distance=18.0, moving_speed_threshold=1.0):
+    """Reposition `vehicle` backward along its own current lane until it
+    clears a safe distance from every OTHER vehicle on the road -- tries
+    the full `retreat` distance first, then less in `retreat_step`
+    increments (fine enough that a clear gap narrower than one step can't
+    be stepped over and missed), down to no movement at all if nothing
+    along that stretch is clear. Returns whether a safe spot was found;
+    `vehicle` is left exactly where it was on a False (never moving is
+    always at least as safe as its own current, already-non-crashed
+    position).
+
+    Two DIFFERENT things can make a center-to-center distance unsafe, so
+    there are two separate thresholds, not one flat number:
+
+    `retreat_safe_distance` (against a vehicle that's ALSO essentially
+    stopped, speed < moving_speed_threshold): must exceed Vehicle.LENGTH
+    (5.0m) by a real margin, not just clear it -- two vehicle BODIES, not
+    points, and a straight retreat along a lane tends to land ego roughly
+    nose-to-tail with whatever's already there. Confirmed as a real, not
+    theoretical, bug: an earlier version of this used exactly 5.0 (equal
+    to LENGTH, zero margin) and a 60-vehicle test on real_001_rebuilt
+    produced 4 new collisions -- traced directly to two STOPPED vehicles
+    (both speed 0.00) left a center-to-center 5.18m apart, just over the
+    old threshold but well inside their own combined body length once
+    nose-to-tail. 7.0 leaves a real ~2m body gap instead of ~0.
+
+    `moving_safe_distance` (against a vehicle that's still moving): wider
+    still, since it can close even a real, non-overlapping gap within a
+    couple of ticks well before reacting to a vehicle that just appeared
+    there -- 18.0, comfortably past this scene's own 8-14 m/s spawn-speed
+    reaction+braking distance.
+
+    Re-running the same 60-vehicle/1500-step test with both fixes
+    produced 0 new collisions and no permanent freeze.
+
+    The bounded, one-time "someone backs the car up" intervention every
+    stuck-resolution function in this codebase uses instead of deleting a
+    vehicle -- never loosens any of crossing_conflict_brake's own safety
+    gates, just clears room for its EXISTING, unmodified release logic to
+    actually see clearance on a later tick.
+
+    The search itself walks the lane GRAPH backward (_walk_back), not
+    just the vehicle's own current lane -- see that function's own
+    docstring for why a same-lane-only search silently wastes most of
+    `retreat` the moment the vehicle is on a short lane (common here).
+    Landing on a different lane than the vehicle started on updates its
+    full state (lane_index/lane/target_lane_index/heading), not just
+    position -- otherwise its own next local_coordinates()-based
+    reasoning (find_front_vehicle, crossing_conflict_brake, ...) would
+    read against a lane object that no longer matches where it visually
+    and physically is.
+    """
+    lon, lat = vehicle.lane.local_coordinates(vehicle.position)
+    others = [(np.asarray(v.position), v.speed) for v in road.vehicles if v is not vehicle]
+    for step_back in np.arange(retreat, retreat_step - 1e-9, -retreat_step):
+        candidate_idx, candidate_lon = _walk_back(road, vehicle.lane_index, lon, step_back)
+        candidate_lane = road.network.get_lane(candidate_idx)
+        candidate_pos = candidate_lane.position(candidate_lon, lat)
+        safe = True
+        for p, speed in others:
+            required = moving_safe_distance if speed >= moving_speed_threshold else retreat_safe_distance
+            if np.linalg.norm(candidate_pos - p) < required:
+                safe = False
+                break
+        if safe:
+            vehicle.position = candidate_pos
+            if candidate_idx != vehicle.lane_index:
+                vehicle.heading = candidate_lane.heading_at(candidate_lon)
+                vehicle.lane_index = candidate_idx
+                vehicle.lane = candidate_lane
+                vehicle.target_lane_index = candidate_idx
+            return True
+    return False
+
+
+def unstick_stalled_traffic(road, dt, timeout_s=25.0, retreat=12.0, retreat_safe_distance=7.0):
+    """Break a genuine permanent standoff WITHOUT ever deleting a vehicle.
+
+    crossing_conflict_brake's own tie-break (see its docstring) resolves
+    most mutual standoffs by letting one side win and move, but its own
+    safe_release_dist gate can leave even the rightful winner stuck
+    forever when the conflict geometry itself never puts the pair that
+    far apart -- confirmed directly: a 60-vehicle run on real_001_rebuilt
+    (apply_better_car_following + advance_vehicles only, no other
+    intervention) collapses to a permanent, exact 0.00 average speed by
+    step ~400 and never recovers over 1500 steps tested. `_stopped_ticks`
+    (already maintained by apply_better_car_following for the tie-break's
+    own use) is what distinguishes this from ordinary queuing: a vehicle
+    whose front gap ever opens even slightly shows nonzero IDM creep and
+    resets its own counter, so `timeout_s` straight seconds of EXACT zero
+    movement is strong evidence of a genuine deadlock, not a long but
+    ordinary wait in a busy queue -- same reasoning this codebase's other
+    stuck-resolution functions already rely on.
+
+    Call once per tick, after apply_better_car_following/road.step -- the
+    general form of what limit_vision_human.py's own _unstick_if_frozen/
+    _unstick_frozen_background/_resolve_stuck_route_pair do for the human/
+    robot specifically (see those for the fuller history); this is the
+    version usable by scene1_background.py's OWN main() loop, which has
+    no human/robot and previously had no unstick mechanism of any kind --
+    the exact gap that produced the permanent freeze above.
+
+    Resets `_stopped_ticks` to 0 after a successful retreat: repositioning
+    doesn't touch `.speed`, so without this the same vehicle would still
+    read as freshly stopped on the very next tick, before IDM has had any
+    chance to actually accelerate it away, and get retreated again and
+    again every tick thereafter.
+
+    HONEST LIMIT, not swept under the rug: retreat only helps where a
+    genuinely SAFE spot exists to retreat TO. In an extremely saturated
+    local cluster (confirmed directly: user_study/test_dense_scene.py's
+    own 35-background+3-robot+seed_maneuver_traffic scene, deliberately
+    named "dense", most of a compact ~160-lane network sitting stopped at
+    once) `_retreat_if_safe`'s own success rate measured as low as ~2% --
+    there is often nowhere within reach that clears every other vehicle's
+    own safety margin, same as a real car genuinely cannot always find
+    room to back up in real gridlock. This function's predecessor
+    "solved" that same scene by deleting vehicles outright (confirmed:
+    swapping ONLY the delete-based version back in, same everything else,
+    recovers the old throughput) -- an option deliberately not available
+    here. What retreat DOES still guarantee, verified directly on that
+    same scene: zero new collisions and no vehicle ever removed, even
+    while progress in that one extreme scenario is genuinely slower than
+    the old delete-based version's own. It is not a substitute for
+    reducing how many vehicles a network is asked to hold at once if a
+    given scene turns out to need more capacity than it has.
+    """
+    for v in road.vehicles:
+        if v.crashed:
+            continue
+        if getattr(v, "_stopped_ticks", 0) * dt < timeout_s:
+            continue
+        if _retreat_if_safe(road, v, retreat, retreat_safe_distance):
+            v._stopped_ticks = 0
 
 
 def add_background_traffic(road, count=100, seed=0, speed_range=(8.0, 14.0), safe_distance=10.0, max_tries=20,
@@ -641,6 +983,7 @@ def main():
         apply_better_car_following(road, lane_indexes, args.dt)
         road.step(args.dt)
         advance_vehicles(road, lane_indexes)
+        unstick_stalled_traffic(road, args.dt)
         step_count += 1
         if args.steps is not None and step_count >= args.steps:
             running = False

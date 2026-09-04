@@ -354,7 +354,7 @@ def apply_human_aware_car_following(road, lane_indexes, dt, radius=35.0):
         if front is None:
             heads.add(id(h))
 
-        conflict = sb.crossing_conflict_brake(h, visible, heads=heads)
+        conflict = sb.crossing_conflict_brake(road, h, visible, heads=heads)
         if conflict is not None:
             accel = min(accel, conflict)
 
@@ -374,15 +374,14 @@ def _unstick_if_frozen(road, human, front, visible, dt):
     remaining cases -- two vehicles from different lanes both stopped right
     at a shared merge point -- that it deliberately does NOT force through,
     since forcing it there traded permanent freezes for new collisions in
-    testing. That's an acceptable risk to leave open for anonymous
-    background traffic; it is not acceptable for the one human this whole
-    module exists to study getting stuck behind it forever (see
-    advance_vehicles_with_route's own "never strand the human" rule).
+    testing. Not acceptable for the one human this whole module exists to
+    study getting stuck behind it forever (see advance_vehicles_with_route's
+    own "never strand the human" rule).
 
     Scoped as narrowly as possible to avoid the exact destabilization
     scene1_background.py's advance_vehicles() docstring already warned
-    about for a broader "remove anything stationary" rule: only ever
-    removes ONE vehicle -- the human's own immediate front_vehicle if it
+    about for a broader "touch anything stationary" rule: only ever
+    retreats ONE vehicle -- the human's own immediate front_vehicle if it
     has one, else (measured necessary: a human repeatedly re-triggering
     crossing_conflict_brake against a DIFFERENT nearby vehicle each tick
     has no front_vehicle at all, so was never being cleared by the
@@ -390,9 +389,23 @@ def _unstick_if_frozen(road, human, front, visible, dt):
     confirmed by testing out to 400s of sim time with zero progress) the
     single closest other vehicle it can currently see -- and only after the
     human itself has been essentially stationary for STALL_TIMEOUT_S
-    straight seconds, long past any ordinary queue wait. This behaves the
-    same as a real-world "someone gets out and moves the stalled car"
-    outcome rather than an invisible teleport of the human itself.
+    straight seconds, long past any ordinary queue wait.
+
+    Retreats (sb._retreat_if_safe), never removes: the same bounded,
+    one-time "someone gets out and moves the stalled car" outcome, but
+    without deleting the blocker from the scene -- an earlier version
+    despawned it outright, which is never an acceptable resolution for a
+    vehicle that's still there and driveable, just temporarily nudged back
+    to open a gap. If no safe retreat spot exists, the blocker is simply
+    left in place (never moving is always at least as safe as its own
+    current position) and this will try again STALL_TIMEOUT_S later.
+
+    A route-following blocker (the robot) is left to _resolve_stuck_
+    route_pair instead, unchanged from before -- that's a genuine
+    human-vs-robot standoff with its own winner/loser fairness convention
+    (whoever's waited longer), not "stuck behind background traffic", and
+    retreating it here too would let this function's own simpler
+    front/nearest-visible targeting silently race that dedicated logic.
     """
     human._stalled_ticks = human._stalled_ticks + 1 if human.speed < 0.5 else 0
     if human._stalled_ticks * dt < STALL_TIMEOUT_S:
@@ -400,17 +413,13 @@ def _unstick_if_frozen(road, human, front, visible, dt):
     blocker = front
     if blocker is None and visible:
         blocker = min(visible, key=lambda v: np.linalg.norm(np.asarray(v.position) - np.asarray(human.position)))
-    # A route-following blocker (the robot) can't be despawned -- that case
-    # is a genuine human-vs-robot standoff, not "stuck behind background
-    # traffic", and is handled separately by _resolve_stuck_route_pair
-    # (called once per tick regardless of whether this function fires at
-    # all, so it isn't gated on human._stalled_ticks specifically).
     if blocker is not None and getattr(blocker, "route_points", None) is None:
-        road.vehicles.remove(blocker)
+        sb._retreat_if_safe(road, blocker)
+        blocker._stopped_ticks = 0
     human._stalled_ticks = 0
 
 
-def _resolve_stuck_route_pair(road, dt, retreat=12.0, clear_dist=10.0, retreat_safe_distance=5.0):
+def _resolve_stuck_route_pair(road, dt, retreat=12.0, clear_dist=10.0, retreat_safe_distance=7.0):
     """The route-following (human/robot) counterpart to _unstick_if_frozen's
     background-blocker case: crossing_conflict_brake's tie-break correctly
     decides WHO should go first between two mutually-stopped vehicles (its
@@ -469,20 +478,28 @@ def _resolve_stuck_route_pair(road, dt, retreat=12.0, clear_dist=10.0, retreat_s
     nothing along that stretch is clear -- never moving is always at least
     as safe as the vehicle's own current, already-non-crashed position.
 
-    retreat_safe_distance=5.0 (~one vehicle length, comfortably more than
-    the 2.7m gap that produced the confirmed crash above) rather than
-    something closer to crossing_conflict_brake's own safe_release_dist=10.0
-    -- that larger a bar was tried first and made things WORSE, not just
-    redundant: in the dense multi-robot/background traffic this module is
-    meant to run under, a full 10m of clearance from EVERY nearby vehicle is
-    often simply unavailable anywhere within a 12m retreat, so the search
-    fell back to "don't move" almost every time -- confirmed directly: a
-    scene that reached 100% route progress with the plain (unsafe) retreat
-    dropped to stalling around 25% once retreat_safe_distance=8.0 made the
-    search fail this often. 5.0 is the smallest value that still
-    categorically prevents the specific failure this exists to fix (two
-    vehicle bodies overlapping) without also defeating the retreat's own
-    purpose.
+    retreat_safe_distance=7.0 (was 5.0 -- exactly Vehicle.LENGTH, zero
+    margin) rather than something closer to crossing_conflict_brake's own
+    safe_release_dist=10.0 -- that larger a bar was tried first and made
+    things WORSE, not just redundant: in the dense multi-robot/background
+    traffic this module is meant to run under, a full 10m of clearance
+    from EVERY nearby vehicle is often simply unavailable anywhere within
+    a 12m retreat, so the search fell back to "don't move" almost every
+    time -- confirmed directly: a scene that reached 100% route progress
+    with the plain (unsafe) retreat dropped to stalling around 25% once
+    retreat_safe_distance=8.0 made the search fail this often. 5.0 was
+    believed to be the smallest value that still categorically prevents
+    the specific failure this exists to fix (two vehicle bodies
+    overlapping), based on a 2.7m-gap crash observed at the time -- but
+    5.0 IS Vehicle.LENGTH (see kinematics.py), so two vehicles left
+    exactly nose-to-tail on the same lane at that distance have zero real
+    body clearance, not a safety margin. Confirmed as a live bug, not
+    theoretical, in scene1_background._retreat_if_safe's own general
+    form of this same mechanism: a 60-vehicle background-only run at the
+    old flat 5.0 threshold produced 4 new collisions, traced to exactly
+    this nose-to-tail configuration at 5.18m. 7.0 leaves a real ~2m body
+    gap, comfortably under the 8.0 that was already found to defeat the
+    retreat's own purpose.
 
     If the DESIGNATED loser still has nowhere safe to go (a genuinely
     saturated local cluster -- confirmed directly: a human and two robots
@@ -574,30 +591,27 @@ def _unstick_frozen_background(road, dt, timeout_s=BACKGROUND_STALL_TIMEOUT_S):
     wait -- same reasoning as _unstick_if_frozen's own STALL_TIMEOUT_S, just
     applied network-wide instead of only to the human's immediate blocker.
 
-    Never removes a route-following vehicle (route_points is not None --
-    the human or the robot): only anonymous background traffic, exactly
-    like _unstick_if_frozen's own guard against removing one of those.
+    RETREATS (sb._retreat_if_safe), never removes -- delegates to
+    scene1_background.unstick_stalled_traffic, the general form of this
+    exact mechanism (see its own docstring for the full reasoning and the
+    confirmed permanent-freeze test that motivated it). An earlier version
+    despawned the stalled vehicle outright; deleting a car that's simply
+    stuck, not crashed, is never an acceptable resolution -- retreating it
+    a bounded, one-time distance to open a gap for the EXISTING, unmodified
+    release logic to see real clearance on a later tick achieves the same
+    "someone backs up the stalled car" outcome without removing anything.
 
-    Iterates a SNAPSHOT (list(road.vehicles)), not road.vehicles itself --
-    removing from a list while a plain `for` loop walks it shifts every
-    later element back one slot, which the loop's own advancing index then
-    steps past, silently skipping whatever just shifted into the removed
-    slot. Confirmed as a real, not theoretical, failure: with two or more
-    long-stopped vehicles adjacent in road.vehicles (exactly a genuine
-    multi-vehicle jam at a busy junction -- the case this function exists
-    to break), the one right after each removed vehicle could be skipped
-    on every single call, forever, since each call started a fresh
-    iteration that reproduced the same skip. Measured directly: a single
-    seeded vehicle's own _stopped_ticks climbed past 4600 (over 300
-    seconds, 12x the 25s timeout) while parked directly in a turn span's
-    own conflict lane, never once removed, permanently blocking that
-    maneuver for the rest of a whole test run.
+    Never touches a route-following vehicle (route_points is not None --
+    the human or the robot): only anonymous background traffic, exactly
+    like _unstick_if_frozen's own guard against those.
     """
-    for v in list(road.vehicles):
+    for v in road.vehicles:
         if getattr(v, "route_points", None) is not None or v.crashed:
             continue
-        if getattr(v, "_stopped_ticks", 0) * dt >= timeout_s:
-            road.vehicles.remove(v)
+        if getattr(v, "_stopped_ticks", 0) * dt < timeout_s:
+            continue
+        if sb._retreat_if_safe(road, v):
+            v._stopped_ticks = 0
 
 
 def advance_vehicles_with_route(road, lane_indexes):

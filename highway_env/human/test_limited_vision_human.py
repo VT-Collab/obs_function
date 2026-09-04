@@ -137,7 +137,7 @@ def check_ablation_matches_unfiltered_logic():
               if sb.find_front_vehicle(road, v, lane_indexes, sb.nearby_vehicles(road, v, 35.0)) is None}
     if front is None:
         heads.add(id(human))
-    conflict = sb.crossing_conflict_brake(human, candidates, heads=heads)
+    conflict = sb.crossing_conflict_brake(road, human, candidates, heads=heads)
     if conflict is not None:
         expected = min(expected, conflict)
     expected = max(expected, -human.speed / DT)

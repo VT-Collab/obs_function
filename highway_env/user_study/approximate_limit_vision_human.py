@@ -294,7 +294,7 @@ class ApproximateLimitVisionHuman(LimitedVisionHuman):
                       if sb.find_front_vehicle(road, v, lane_indexes, sb.nearby_vehicles(road, v, radius)) is None}
             if front is None:
                 heads.add(id(self))
-            conflict = sb.crossing_conflict_brake(self, visible, heads=heads)
+            conflict = sb.crossing_conflict_brake(road, self, visible, heads=heads)
             if conflict is not None:
                 accel = min(accel, conflict)
             # apply_human_aware_car_following's own per-human loop always

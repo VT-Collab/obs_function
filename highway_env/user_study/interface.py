@@ -304,7 +304,7 @@ def main():
                        if sb.find_front_vehicle(road, v, lane_indexes, sb.nearby_vehicles(road, v, 35.0)) is None}
             if front_r is None:
                 heads_r.add(id(robot))
-            conflict_r = sb.crossing_conflict_brake(robot, candidates_r, heads=heads_r)
+            conflict_r = sb.crossing_conflict_brake(road, robot, candidates_r, heads=heads_r)
             ctx = types.SimpleNamespace(robot=robot, front_vehicle=front_r,
                                          human=human if not human.crashed else None, belief=belief, dt=args.dt,
                                          crossing_conflict_accel=conflict_r)

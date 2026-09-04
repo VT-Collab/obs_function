@@ -71,7 +71,7 @@ def run(scene, true_fov, seed, n_robots=3, background_count=35, robot_weight_see
                        if sb.find_front_vehicle(road, v, lane_indexes, sb.nearby_vehicles(road, v, 35.0)) is None}
             if front_r is None:
                 heads_r.add(id(robot))
-            conflict_r = sb.crossing_conflict_brake(robot, candidates_r, heads=heads_r)
+            conflict_r = sb.crossing_conflict_brake(road, robot, candidates_r, heads=heads_r)
             ctx = types.SimpleNamespace(robot=robot, front_vehicle=front_r,
                                          human=human if not human.crashed else None, belief=belief, dt=DT,
                                          crossing_conflict_accel=conflict_r)

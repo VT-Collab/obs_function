@@ -203,13 +203,15 @@ def seed_maneuver_traffic(road, subtasks_list, seed=0, speed_range=(1.2, 2.5), n
     response times.
 
     The floor of 1.2 (not slower still, which would linger even longer)
-    is deliberate: limit_vision_human._unstick_frozen_background removes
-    ANY non-route vehicle once its speed has read below 1.0 for 25
-    straight seconds, network-wide, regardless of why -- a seeded vehicle
-    genuinely cruising at, say, 0.8 would eventually get silently deleted
-    by that same mechanism before a slow-to-react player ever reached it,
-    defeating the whole point of lingering longer. Staying safely above
-    that 1.0 cutoff means this vehicle is never mistaken for a stalled one.
+    is deliberate: limit_vision_human._unstick_frozen_background retreats
+    (see its own docstring -- no longer removes) ANY non-route vehicle
+    once its speed has read below 1.0 for 25 straight seconds, network-
+    wide, regardless of why -- a seeded vehicle genuinely cruising at,
+    say, 0.8 would eventually get nudged back along its own lane by that
+    same mechanism before a slow-to-react player ever reached it, still
+    present but no longer exactly where it was placed. Staying safely
+    above that 1.0 cutoff means this vehicle is never mistaken for a
+    stalled one in the first place.
     """
     rng = np.random.default_rng(seed)
     spawned = []

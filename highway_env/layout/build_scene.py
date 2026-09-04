@@ -568,6 +568,264 @@ def connect_junctions(net, prefix_a, center_a, access_length_a, corner_a,
                      StraightLane(p_b_exit, p_a_approach, width=lane_width, line_types=[edge_left, edge_right]))
 
 
+# ---------------------------------------------------------------------------
+# Chain stitching -- every real_0XX_rebuilt.py layout in layouts/ is built by
+# repeating the SAME three hops (junction -> junction, junction <-> roundabout,
+# junction/roundabout -> merge highway), each hop always the same
+# exit-point-extraction + downstream-center-placement + primitive-call +
+# both-direction-bridge sequence, just with different corners/lane counts/
+# turn choices per scene. real_001_rebuilt.py was the first to need every
+# hop bridging ALL lanes exactly straight (not just the route's own single
+# lane) -- these three functions are that exact sequence, factored out so
+# every layout can call it instead of re-deriving it inline. A local
+# (function-body, not module-level) import of _layout_utils below: this
+# file's own __main__ demo runs standalone with only ITS OWN directory on
+# sys.path (see the bottom of this file), not layouts/, so a module-level
+# import here would break that demo; every real caller of these three
+# functions is itself a layouts/*.py file loaded through display_all.py's
+# own machinery, which always has layouts/ on sys.path by the time any of
+# them actually run.
+def stitch_junction(net, source, prefix, access_length, n_lanes, missing_corner=None, gap=12.0,
+                     lane_width=LANE_WIDTH, bridge_n=None):
+    """Place a three_way (or, if missing_corner is None, a four_way)
+    junction directly ahead of another already-built primitive's own exit,
+    and bridge every one of `bridge_n` lanes between them, both directions
+    -- the exit-point extraction + center_ahead_corner + add_three_way/
+    add_four_way + bridge sequence every junction-arriving hop in every
+    real_0XX_rebuilt.py layout repeats identically. Returns the new
+    junction's own center, in case a caller needs it (none currently do
+    -- every next hop re-derives its own placement from THIS junction's
+    own exit via exit_far/exit_far_center instead, same as before this
+    function existed).
+
+    source: ("junction", prefix, corner, lane_i) -- exit_far + both-lane
+    bridge_corners, or ("roundabout", ra_prefix, gap_k, lane_i) -- a
+    roundabout's own exit gap + bridge_roundabout, same two node-naming
+    conventions stitch_merge's own `source` branches on (see its own
+    docstring).
+
+    n_lanes is the NEW junction's own lane count (n_stem/n_cross or
+    n_vertical/n_horizontal); bridge_n (default: n_lanes) is how many
+    lanes actually bridge across. These differ whenever the source is a
+    roundabout with FEWER lanes than the junction it meets (a genuine
+    narrowing, same as bridge_corners'/bridge_roundabout's own docstrings
+    on why a plain single-lane bridge is correct there, not a bug) --
+    every junction-source hop in this codebase so far keeps both counts
+    equal, so the default reproduces those unchanged.
+
+    The new junction's own entry corner (which of ITS corners receives
+    this bridge) isn't a free choice -- center_ahead_corner's own fixed
+    `corner_angle = heading_rad + 90deg` formula (see its own docstring)
+    places the new center so ONE specific corner's own far point lands
+    `gap` further along `heading_rad`, and that corner is exactly
+    corner_for_heading(heading_rad) (verified directly against every
+    existing real_0XX_rebuilt.py hop by hand: FW's own -90deg exit lands
+    on corner 0, TW1's own 180deg exit lands on corner 3, etc.) -- so this
+    derives it the same way instead of taking it as a separate parameter a
+    caller could pass out of sync with center_ahead_corner's own placement.
+    """
+    from _layout_utils import exit_far, center_ahead_corner, corner_for_heading, bridge_corners, bridge_roundabout
+    kind, src_prefix, src_corner_or_k, src_lane_i = source
+    if kind == "junction":
+        far, heading = exit_far(net, src_prefix, src_corner_or_k, src_lane_i)
+    else:
+        # Deliberately the RAW (lane-specific) farout point, mirroring the
+        # junction-source branch just above (raw exit_far, not a centered
+        # variant) -- center_ahead_corner (below) expects its far_point and
+        # its own lane_j=0 to reference the SAME physical lane, so its
+        # internal turn_lat(0) correction is applied exactly once. An
+        # earlier version centered this point first (undoing lane 0's own
+        # turn_lat before handing it to center_ahead_corner, which then
+        # subtracts that SAME turn_lat(0) again internally) -- a real,
+        # measured bug: every roundabout-to-junction bridge came out at a
+        # diagonal (heading -14 degrees instead of the true cardinal 0),
+        # exactly this codebase's own real_003/004/005/006/008/009's own
+        # "slanted roundabout connection" report. merge()'s own `center`
+        # param -- like round_about's -- genuinely DOES want the true axis
+        # directly with no further per-lane correction, which is why
+        # stitch_merge's own roundabout-source branch (below, separately)
+        # still centers its point first -- the same distinction
+        # real_001_rebuilt.py's own hand-written code draws between
+        # exit_far_center-for-round_about/merge and raw exit_far-for-
+        # add_three_way/add_four_way.
+        gap_k = src_corner_or_k
+        out_lane = net.get_lane((f"{src_prefix}bendout{gap_k}_{src_lane_i}", f"{src_prefix}farout{gap_k}_{src_lane_i}", 0))
+        far, heading = out_lane.position(out_lane.length, 0), out_lane.heading_at(out_lane.length)
+    entry_corner = corner_for_heading(heading)
+    od = lane_width + RIGHT_TURN_RADIUS_EXTRA + lane_width / 2
+    center = center_ahead_corner(far, heading, 0, access_length, od, gap, lane_width)
+    if missing_corner is None:
+        add_four_way(net, center=center, n_vertical=n_lanes, n_horizontal=n_lanes,
+                     access_length=access_length, lane_width=lane_width, prefix=prefix)
+    else:
+        add_three_way(net, center=center, n_stem=n_lanes, n_cross=n_lanes, access_length=access_length,
+                      lane_width=lane_width, prefix=prefix, missing_corner=missing_corner)
+    n = n_lanes if bridge_n is None else bridge_n
+    if kind == "junction":
+        bridge_corners(net, src_prefix, src_corner_or_k, prefix, entry_corner, n)
+    else:
+        bridge_roundabout(net, src_prefix, src_corner_or_k, prefix, entry_corner,
+                           j_lane_i=0, ra_lane_i=src_lane_i, n=n)
+    return center
+
+
+def stitch_roundabout(net, from_prefix, from_corner, from_lane_i, prefix, radius, access_length, alpha,
+                       merge_radius, n_lanes, gap=12.0, lane_width=LANE_WIDTH, exact_axis_ref=None,
+                       bridge_lane_i=None, in_k=None):
+    """Place a roundabout after a junction's own exit arm, and bridge every
+    one of `n_lanes` lanes at the entry gap, both directions -- the
+    exit_far/exit_far_center + center placement + round_about +
+    bridge_roundabout sequence every roundabout-having layout repeats.
+
+    in_k: which of the roundabout's own 4 gaps (0 east, 1 north, 2 west, 3
+    south) receives this bridge. None (default) derives it from the
+    incoming heading via ring_gap_for_heading -- the same value every
+    existing call site either hardcodes or already computes this same way
+    (verified directly against real_001_rebuilt.py's own RA_IN_K=1 and
+    real_003/004_rebuilt.py's own ring_gap_for_heading(...) calls) -- so
+    this only needs overriding if a future scene genuinely wants a gap
+    other than the one physically facing the incoming road.
+
+    from_lane_i is the lane queried for the CENTER placement itself
+    (exit_far/exit_far_center); bridge_lane_i (default: from_lane_i, every
+    existing non-real_001 call site's own implicit convention) is the
+    first lane index bridge_roundabout actually bridges from. These can
+    differ: real_001_rebuilt.py's own case queries lane 1 for the
+    placement (exit_far_center returns the SAME true center point for any
+    lane_i, but must be a lane that actually exists) while bridging every
+    lane starting from 0 (j_lane_i=0, n=n_lanes).
+
+    exact_axis_ref: optional (ref_prefix, ref_corner, ref_lane_i) naming a
+    SECOND already-built primitive's own exit arm whose true axis the
+    roundabout's own center should ALSO land on exactly, in addition to
+    from_prefix/from_corner's own axis -- real_001_rebuilt.py's own case,
+    where the roundabout sits between TW2's own north gap and a direct
+    link to FW's own west arm, positioned so both bridge in perfectly
+    straight (see real_001_rebuilt.py's own docstring for the full
+    reasoning). Every add_four_way/add_three_way corner is cardinal by
+    construction (exit_far_center's own docstring), so exactly one of
+    from_corner's/ref_corner's own exits travels vertically (its own X
+    fixed) and the other horizontally (its own Y fixed); combining the
+    fixed coordinate from EACH lands on both axes at once, independent of
+    which one is which -- verified directly against real_001_rebuilt.py's
+    own hand-derived `ra_center = np.array([tw2_far[0], fw_west_far[1]])`.
+
+    None (default): single-axis placement (`far + (access_length+radius+
+    gap)*direction`), still off exit_far_center's own TRUE centerline
+    point (not exit_far's raw lane-i-specific one) -- needed as soon as
+    this bridges more than one lane at the entry gap (n_lanes>1, the
+    ordinary case now that every primitive in a scene shares the same
+    lane count), for the exact same reason exact_axis_ref's own branch
+    already does: a single-lane bridge can silently absorb one lane's own
+    turn_lat offset as an invisible angle, but N>1 lanes bridged in
+    parallel expose it as a real diagonal twist.
+    """
+    from _layout_utils import exit_far_center, ring_gap_for_heading, bridge_roundabout
+    if exact_axis_ref is None:
+        far, heading = exit_far_center(net, from_prefix, from_corner, from_lane_i, lane_width)
+        center = np.array(far) + (access_length + radius + gap) * np.array(
+            [np.cos(heading), np.sin(heading)])
+    else:
+        far, heading = exit_far_center(net, from_prefix, from_corner, from_lane_i, lane_width)
+        ref_prefix, ref_corner, ref_lane_i = exact_axis_ref
+        ref_far, _ = exit_far_center(net, ref_prefix, ref_corner, ref_lane_i, lane_width)
+        is_vertical = abs(np.cos(heading)) < 0.5
+        x = far[0] if is_vertical else ref_far[0]
+        y = ref_far[1] if is_vertical else far[1]
+        center = np.array([x, y])
+    round_about(net, center=center, radius=radius, n_lanes=n_lanes, access_length=access_length,
+                alpha=alpha, merge_radius=merge_radius, lane_width=lane_width, prefix=prefix)
+    resolved_in_k = ring_gap_for_heading(heading) if in_k is None else in_k
+    j_lane_i = from_lane_i if bridge_lane_i is None else bridge_lane_i
+    bridge_roundabout(net, prefix, resolved_in_k, from_prefix, from_corner, j_lane_i=j_lane_i, ra_lane_i=0, n=n_lanes)
+    return center
+
+
+def stitch_merge(net, source, prefix, n_lanes, gap=12.0, lane_width=LANE_WIDTH, exact_center=False,
+                  **merge_kwargs):
+    """Place a merge() highway directly ahead of a junction's own exit arm
+    or a roundabout's own exit gap, and bridge it in -- the far/heading
+    extraction + GAP offset + merge() + bridge sequence every
+    merge-having layout repeats. `merge_kwargs` (before_length,
+    taper_length, merge_length, after_length, ramp_side, ramp_gap,
+    amplitude, bidirectional) pass straight through to merge() itself.
+
+    source: ("junction", prefix, corner, lane_i) or ("roundabout",
+    ra_prefix, gap_k, lane_i) -- the two node-naming conventions
+    (il{c}_i/o{c}_i vs bendout{k}_i/farout{k}_i) every existing merge call
+    site's own far/heading extraction already branches on by hand.
+
+    exact_center=False (default): bridges with a single bridge() call
+    reusing the placement `center` directly as its own far point -- valid
+    because n_lanes=1 lane 0 always sits exactly ON that center
+    (bidirectional=False's own ly=0 for lane 0), exactly every existing
+    non-real_001 call site's own pattern, byte-for-byte unchanged.
+
+    exact_center=True: undoes the source lane's own turn_lat offset first
+    (same reasoning as exit_far_center -- round_about's own bendout/farout
+    nodes don't have their own exit_far_center-style helper, so this
+    re-derives the same math directly), and bridges EVERY one of n_lanes
+    lanes, both the forward direction (into "{prefix}a_i") and, if
+    merge_kwargs sets bidirectional=True, the return direction too (the
+    merge's own "rd_i" lanes back into the roundabout's entry at this same
+    gap) -- real_001_rebuilt.py's own exact pattern, needed once more than
+    one lane bridges in parallel (see exit_far_center's own docstring on
+    why a single-lane bridge can silently absorb an axis offset that N>1
+    lanes bridged together cannot).
+    """
+    from _layout_utils import exit_far, bridge
+    kind, src_prefix, src_corner_or_k, src_lane_i = source
+    if kind == "junction":
+        far, heading = exit_far(net, src_prefix, src_corner_or_k, src_lane_i)
+        exit_node = f"{src_prefix}o{src_corner_or_k}_{src_lane_i}"
+    else:
+        gap_k = src_corner_or_k
+        out_lane = net.get_lane((f"{src_prefix}bendout{gap_k}_{src_lane_i}", f"{src_prefix}farout{gap_k}_{src_lane_i}", 0))
+        far = out_lane.position(out_lane.length, 0)
+        heading = out_lane.heading_at(out_lane.length)
+        exit_node = f"{src_prefix}farout{gap_k}_{src_lane_i}"
+
+    direction = np.array([np.cos(heading), np.sin(heading)])
+    if exact_center:
+        lateral = np.array([-direction[1], direction[0]])
+        turn_lat = lane_width / 2 + src_lane_i * lane_width
+        far = far - turn_lat * lateral
+    center = np.array(far) + gap * direction
+
+    merge(net, center=center, heading_deg=np.degrees(heading), n_lanes=n_lanes, lane_width=lane_width,
+          prefix=prefix, **merge_kwargs)
+
+    if not exact_center:
+        bridge(net, exit_node, f"{prefix}a_0", far, center)
+        return center
+
+    bidirectional = merge_kwargs.get("bidirectional", False)
+    for i in range(n_lanes):
+        edge_left = S if i != 0 else C
+        edge_right = C if i == n_lanes - 1 else S
+        if kind == "junction":
+            i_far, _ = exit_far(net, src_prefix, src_corner_or_k, i)
+            i_exit_node = f"{src_prefix}o{src_corner_or_k}_{i}"
+        else:
+            i_out_lane = net.get_lane((f"{src_prefix}bendout{gap_k}_{i}", f"{src_prefix}farout{gap_k}_{i}", 0))
+            i_far = i_out_lane.position(i_out_lane.length, 0)
+            i_exit_node = f"{src_prefix}farout{gap_k}_{i}"
+        a_i_pos = net.get_lane((f"{prefix}a_{i}", f"{prefix}b_{i}", 0)).position(0, 0)
+        bridge(net, i_exit_node, f"{prefix}a_{i}", i_far, a_i_pos, line_types=(edge_left, edge_right))
+
+        if not bidirectional:
+            continue
+        rd_i_lane = net.get_lane((f"{prefix}ra_{i}", f"{prefix}rd_{i}", 0))
+        rd_i_pos = rd_i_lane.position(rd_i_lane.length, 0)
+        if kind == "junction":
+            in_i_pos = net.get_lane((f"{src_prefix}o{src_corner_or_k}_{i}", f"{src_prefix}ir{src_corner_or_k}_{i}", 0)).position(0, 0)
+        else:
+            in_i_pos = net.get_lane((f"{src_prefix}farin{gap_k}_{i}", f"{src_prefix}bendin{gap_k}_{i}", 0)).position(0, 0)
+        bridge(net, f"{prefix}rd_{i}", i_exit_node if kind == "junction" else f"{src_prefix}farin{gap_k}_{i}",
+               rd_i_pos, in_i_pos, line_types=(edge_left, edge_right))
+    return center
+
+
 def merge(net, center, heading_deg, n_lanes, before_length=150.0, taper_length=80.0,
           merge_length=80.0, after_length=150.0, lane_width=LANE_WIDTH,
           ramp_gap=2.0, amplitude=3.25, ramp_side=1, bidirectional=False, prefix=""):
@@ -689,7 +947,24 @@ def merge(net, center, heading_deg, n_lanes, before_length=150.0, taper_length=8
     # highway's own curb), eases in with a SineLane, then runs parallel
     # for merge_length and stops -- same recipe as MergeEnv's ljk/lkb/lbc,
     # generalized to n_lanes and to either side (ramp_side).
-    curb_ly = lane_offset + (n_lanes - 1) * lane_width if ramp_side > 0 else lane_offset
+    # ramp_side > 0: beside the highest-index forward lane, same either way
+    # (bidirectional or not). ramp_side < 0: for a one-way road (lane_offset
+    # ==0), lane 0 IS the true edge, so curb_ly = lane_offset = 0 is already
+    # correct -- but for a bidirectional road, the -lateral side isn't open
+    # road at all, it's the MIRRORED reverse-direction lanes (ly = -lane_
+    # offset - i*lane_width, added below) -- curb_ly = lane_offset there
+    # (a real bug, not a style choice) put the ramp's own final_ly exactly
+    # ON TOP of reverse lane 0's own centerline (verified directly: both
+    # landed at ly=-2.0 for this codebase's own lane_width=4), not outside
+    # the road at all. The true outer edge on that side is the FARTHEST
+    # reverse lane instead, mirroring the ramp_side>0 branch's own
+    # (n_lanes-1)*lane_width term.
+    if ramp_side > 0:
+        curb_ly = lane_offset + (n_lanes - 1) * lane_width
+    elif bidirectional:
+        curb_ly = -lane_offset - (n_lanes - 1) * lane_width
+    else:
+        curb_ly = lane_offset
     final_ly = curb_ly + ramp_side * (lane_width / 2 + ramp_gap + lane_width / 2)
     start_ly = final_ly + ramp_side * 2 * amplitude
 

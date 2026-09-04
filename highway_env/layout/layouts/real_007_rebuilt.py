@@ -14,16 +14,22 @@ turn_corner was (see that file's docstring): the identical curve reads as
 a sharp, isolated "elbow" alone in a corridor, but reads as smooth,
 ordinary intersection geometry once embedded inside a real junction.
 
-FW<->TW1<->TW2 uses bridge_corners (both lanes) -- see real_001_rebuilt.py's
-own docstring for why a single-lane bridge leaves the outer lane
-disconnected (TW2<->RA stays single-lane, since the roundabout itself only
-has one). The route makes two lane changes total: one right after the
-4-way (0 -> 1), riding lane 1's own pre-built turn geometry through both
-T-junctions before dropping back to lane 0 via the roundabout bridge
-itself, and one more onto the merge highway's own lane 1, ridden to the
-end rather than changed back (see real_001_rebuilt.py's own docstring on
-why an earlier "out and back" pair on the merge highway left the outer
-lane looking cut).
+Every primitive here (add_four_way, add_three_way, round_about, merge)
+uses the SAME lane count throughout (2 each direction), matching
+real_001_rebuilt.py's own convention exactly -- no primitive narrows
+relative to its neighbor, so every hop carries every lane across, in both
+directions. The roundabout's own n_lanes=2 and RA_ACCESS=40.0 and the
+merge's own bidirectional=True with MG_TAPER=40.0 (amplitude scaled the
+same way) are the SAME numeric values real_001_rebuilt.py uses -- see its
+own docstring for why each one is what it is.
+
+The route makes ONE lane change: right after the 4-way (0 -> 1), riding
+lane 1's own pre-built turn geometry through both T-junctions, the
+roundabout's own half-turn, and onto the merge highway's own lane 1
+directly -- no second change needed, since every primitive from there on
+shares the same lane count (see real_001_rebuilt.py's own docstring on
+why an earlier version needed a second change here, before every
+primitive matched).
 
 HUMAN_ROUTE: south arm of the 4-way, straight through.
 ROBOT_ROUTE: east arm, right turn -- joining the human immediately at the
@@ -37,11 +43,9 @@ import numpy as np
 
 from highway_env.road.road import Road, RoadNetwork
 
-from build_scene import LANE_WIDTH, RIGHT_TURN_RADIUS_EXTRA, add_four_way, add_three_way, round_about, merge
-from _layout_utils import bridge, bridge_corners, bridge_roundabout, center_ahead_corner, exit_far, \
-    lane_change_to, ring_gap_for_heading, polyline, prune_to_route, route_adjacent_lane_indexes as _route_adjacent
-
-RIGHT_TURN_RADIUS_BASE = LANE_WIDTH + RIGHT_TURN_RADIUS_EXTRA
+from build_scene import LANE_WIDTH, S, add_four_way, stitch_junction, stitch_roundabout, stitch_merge
+from _layout_utils import lane_change_to, ring_gap_for_heading, polyline, prune_to_route, \
+    route_adjacent_lane_indexes as _route_adjacent
 
 FW_CENTER = (0.0, 0.0)
 FW_ACCESS = 25.0
@@ -56,11 +60,16 @@ N_TW2 = 2
 TW2_MISSING_CORNER = 1  # stem = corner 3 (east), matching TW1's own west-exit heading
 
 RA_RADIUS = 22.0  # bumped from 10: highway_env draws curves as straight STRIPE_SPACING=4.33m chords -- fine on a wide highway curve, visibly faceted on a tight roundabout, so the ring needs a bigger radius to stay smooth-looking
-RA_ACCESS = 18.0
+RA_ACCESS = 40.0  # matches real_001_rebuilt.py's own value exactly
 RA_ALPHA = 24.0
 RA_MERGE_RADIUS = 16.0  # bumped from 8, same reason (the access-to-ring bend arcs)
 
-MG_BEFORE, MG_TAPER, MG_MERGE, MG_AFTER = 20.0, 20.0, 20.0, 30.0
+# Short, not the reference highway_env MergeEnv's own 150/80/80/150 -- see
+# real_001_rebuilt.py's own docstring on MG_BEFORE/MG_TAPER for the full
+# reasoning; every value here is the SAME as real_001_rebuilt.py's own.
+MG_BEFORE, MG_TAPER, MG_MERGE, MG_AFTER = 20.0, 40.0, 20.0, 30.0
+MG_TAPER_AMPLITUDE = 3.25 / 80 * MG_TAPER  # see real_001_rebuilt.py's own docstring
+MG_LANES = N_TW2  # bidirectional -- matches every other primitive here (2 lanes each way)
 
 GAP = 12.0
 
@@ -78,54 +87,48 @@ def _build_network() -> RoadNetwork:
                  access_length=FW_ACCESS, prefix="fw_")
 
     # FW's north exit (heading -90) -> TW1's south arm (stem).
-    fw_far, fw_heading = exit_far(net, "fw_", 2, 0)
-    tw_od = RIGHT_TURN_RADIUS_BASE + LANE_WIDTH / 2
-    tw1_center = center_ahead_corner(fw_far, fw_heading, 0, TW1_ACCESS, tw_od, GAP, LANE_WIDTH)
-    add_three_way(net, center=tw1_center, n_stem=N_TW1, n_cross=N_TW1, access_length=TW1_ACCESS,
-                  prefix="tw1_", missing_corner=TW1_MISSING_CORNER)
-    bridge_corners(net, "fw_", 2, "tw1_", 0, N_FW)
+    stitch_junction(net, ("junction", "fw_", 2, 0), "tw1_", TW1_ACCESS, N_TW1,
+                     missing_corner=TW1_MISSING_CORNER, gap=GAP)
 
     # LEFT turn onto TW1's west arm (heading 180) -> TW2's east arm (stem).
-    tw1_far, tw1_heading = exit_far(net, "tw1_", 1, 0)
-    tw2_center = center_ahead_corner(tw1_far, tw1_heading, 0, TW2_ACCESS, tw_od, GAP, LANE_WIDTH)
-    add_three_way(net, center=tw2_center, n_stem=N_TW2, n_cross=N_TW2, access_length=TW2_ACCESS,
-                  prefix="tw2_", missing_corner=TW2_MISSING_CORNER)
-    bridge_corners(net, "tw1_", 1, "tw2_", 3, N_TW1)
+    stitch_junction(net, ("junction", "tw1_", 1, 0), "tw2_", TW2_ACCESS, N_TW2,
+                     missing_corner=TW2_MISSING_CORNER, gap=GAP)
 
     # LEFT turn onto TW2's south arm (heading 90) -> roundabout, entering
-    # from its north-facing gap. Queried on lane 1 -- the route rides lane
-    # 1 through both T-junctions (see the lane change below) -- though the
-    # bridge itself only carries the one lane the route uses.
-    tw2_far, tw2_heading = exit_far(net, "tw2_", 0, 1)
-    ra_center = np.array(tw2_far) + (RA_ACCESS + RA_RADIUS + GAP) * np.array(
-        [np.cos(tw2_heading), np.sin(tw2_heading)])
-    round_about(net, center=ra_center, radius=RA_RADIUS, n_lanes=1, access_length=RA_ACCESS,
-                alpha=RA_ALPHA, merge_radius=RA_MERGE_RADIUS, prefix="ra_")
-    bridge_roundabout(net, "ra_", _RA_IN_K, "tw2_", 0, j_lane_i=1)
+    # from its north-facing gap. TW2 and the roundabout carry the SAME
+    # lane count (both 2), so every lane bridges 1:1.
+    stitch_roundabout(net, "tw2_", 0, 1, "ra_", RA_RADIUS, RA_ACCESS, RA_ALPHA, RA_MERGE_RADIUS,
+                       n_lanes=N_TW2, gap=GAP, in_k=_RA_IN_K, bridge_lane_i=0)
 
-    # Half-turn around the ring -> highway merge.
-    ra_out_lane = net.get_lane((f"ra_bendout{_RA_OUT_K}_0", f"ra_farout{_RA_OUT_K}_0", 0))
-    ra_out_far = ra_out_lane.position(ra_out_lane.length, 0)
-    ra_out_heading = ra_out_lane.heading_at(ra_out_lane.length)
-    mg_center = np.array(ra_out_far) + GAP * np.array([np.cos(ra_out_heading), np.sin(ra_out_heading)])
-    merge(net, center=mg_center, heading_deg=np.degrees(ra_out_heading), n_lanes=2,
-          before_length=MG_BEFORE, taper_length=MG_TAPER, merge_length=MG_MERGE, after_length=MG_AFTER,
-          ramp_side=1, prefix="mg_")
-    bridge(net, f"ra_farout{_RA_OUT_K}_0", "mg_a_0", ra_out_far, mg_center)
+    # Half-turn around the ring -> highway merge, bidirectional (matching
+    # every other primitive here) and exact_center=True since this bridges
+    # N_TW2 lanes in parallel.
+    stitch_merge(net, ("roundabout", "ra_", _RA_OUT_K, 1), "mg_", MG_LANES, gap=GAP, exact_center=True,
+                 before_length=MG_BEFORE, taper_length=MG_TAPER, merge_length=MG_MERGE, after_length=MG_AFTER,
+                 ramp_side=1, ramp_gap=0.0, amplitude=MG_TAPER_AMPLITUDE, bidirectional=True)
 
-    # Lane change #1: FW's own north exit (0 -> 1).
+    # The merge lane (ramp) is NOT bridged to the roundabout -- see
+    # real_001_rebuilt.py's own docstring for the full reasoning. It still
+    # visibly merges into the highway a little further on, via one
+    # lane-change run the rest of the way down the highway for a visibly
+    # gentle curve -- same construction as real_001_rebuilt.py's own.
+    ramp_taper = net.get_lane(("mg_k", "mg_b_ramp", 0))
+    p0 = ramp_taper.position(ramp_taper.length, 0)
+    h0 = ramp_taper.heading_at(ramp_taper.length)
+    highway_outer = net.get_lane(("mg_b_1", "mg_c_1", 0))
+    target = highway_outer.position(highway_outer.length, 0)
+    lane_change_to(net, "mg_b_ramp", "mg_c_1", p0, h0, target, LANE_WIDTH, line_types=(S, S))
+    del net.graph["mg_b_ramp"]["mg_c_ramp"]  # superseded by the lane-change above -- see real_001_rebuilt.py's own docstring
+
+    # Lane change #1: FW's own north exit (0 -> 1), landing on lane 1's own
+    # pre-built far point so bridge_corners' own lane-1 bridge -- and then
+    # lane 1's own complete pre-built turn geometry through both
+    # T-junctions and the roundabout -- carries the route to the merge's
+    # own lane 1 without any further changes in between.
     p = net.get_lane(("fw_il2_0", "fw_o2_0", 0)).position(0, 0)
     h = net.get_lane(("fw_il2_0", "fw_o2_0", 0)).heading_at(0)
     target = net.get_lane(("fw_il2_1", "fw_o2_1", 0))
     lane_change_to(net, "fw_il2_0", "fw_o2_1", p, h, target.position(target.length, 0), LANE_WIDTH)
-
-    # Lane change #2: onto the merge's own "before" stretch (0 -> 1),
-    # ridden all the way to the end on lane 1 -- the true outer lane --
-    # without any further changes or forks away from it.
-    p = net.get_lane(("mg_a_0", "mg_b_0", 0)).position(0, 0)
-    h = net.get_lane(("mg_a_0", "mg_b_0", 0)).heading_at(0)
-    target = net.get_lane(("mg_a_1", "mg_b_1", 0))
-    lane_change_to(net, "mg_a_0", "mg_b_1", p, h, target.position(target.length, 0), LANE_WIDTH)
 
     prune_to_route(net, _HUMAN_ROUTE_LANES, _ROBOT_ROUTE_LANES)
     return net
@@ -141,15 +144,15 @@ _SHARED_TAIL = [
     ("tw1_o0_1", "tw1_ir0_1", 0), ("tw1_ir0_1", "tw1_il1_1", 0),  # left turn onto the west arm, lane 1
     ("tw1_il1_1", "tw1_o1_1", 0), ("tw1_o1_1", "tw2_o3_1", 0),    # bridge, lane 1
     ("tw2_o3_1", "tw2_ir3_1", 0), ("tw2_ir3_1", "tw2_il0_1", 0),  # left turn onto the south arm, lane 1
-    ("tw2_il0_1", "tw2_o0_1", 0), ("tw2_o0_1", f"ra_farin{_RA_IN_K}_0", 0),
-    (f"ra_farin{_RA_IN_K}_0", f"ra_bendin{_RA_IN_K}_0", 0), (f"ra_bendin{_RA_IN_K}_0", f"ra_entry{_RA_IN_K}_0", 0),
-    (f"ra_entry{_RA_IN_K}_0", f"ra_exit{_RA_HOP_K}_0", 0),
-    (f"ra_exit{_RA_HOP_K}_0", f"ra_entry{_RA_HOP_K}_0", 0),  # pass through, don't leave
-    (f"ra_entry{_RA_HOP_K}_0", f"ra_exit{_RA_OUT_K}_0", 0),
-    (f"ra_exit{_RA_OUT_K}_0", f"ra_bendout{_RA_OUT_K}_0", 0), (f"ra_bendout{_RA_OUT_K}_0", f"ra_farout{_RA_OUT_K}_0", 0),
-    (f"ra_farout{_RA_OUT_K}_0", "mg_a_0", 0),
-    ("mg_a_0", "mg_b_1", 0),                                      # lane change #2 (0->1)
-    ("mg_b_1", "mg_c_1", 0),                                      # merge/taper zone, lane 1
+    ("tw2_il0_1", "tw2_o0_1", 0), ("tw2_o0_1", f"ra_farin{_RA_IN_K}_1", 0),
+    (f"ra_farin{_RA_IN_K}_1", f"ra_bendin{_RA_IN_K}_1", 0), (f"ra_bendin{_RA_IN_K}_1", f"ra_entry{_RA_IN_K}_1", 0),
+    (f"ra_entry{_RA_IN_K}_1", f"ra_exit{_RA_HOP_K}_1", 0),
+    (f"ra_exit{_RA_HOP_K}_1", f"ra_entry{_RA_HOP_K}_1", 0),  # pass through, don't leave
+    (f"ra_entry{_RA_HOP_K}_1", f"ra_exit{_RA_OUT_K}_1", 0),
+    (f"ra_exit{_RA_OUT_K}_1", f"ra_bendout{_RA_OUT_K}_1", 0), (f"ra_bendout{_RA_OUT_K}_1", f"ra_farout{_RA_OUT_K}_1", 0),
+    (f"ra_farout{_RA_OUT_K}_1", "mg_a_1", 0),                     # bridge, into the highway's own normal lane 1
+    ("mg_a_1", "mg_b_1", 0),                                      # before zone, lane 1 -- no lane change needed,
+    ("mg_b_1", "mg_c_1", 0),                                      # matches the merge's own lane 1 exactly
     ("mg_c_1", "mg_d_1", 0),                                      # after zone, lane 1 (true outer lane, no further change)
 ]
 
