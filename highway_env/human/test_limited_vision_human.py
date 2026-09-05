@@ -18,7 +18,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # highway_env/
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "layout"))
 import display_all as d  # noqa: E402
-import scene1_background as sb  # noqa: E402
+import scene_background as sb  # noqa: E402
 import limit_vision_human as h  # noqa: E402
 
 SCENE = "real_001_rebuilt"
@@ -93,7 +93,11 @@ def check_visible_candidates_identity_when_disabled():
     be the identity function -- the whole point of the flags being on ONE
     class rather than a subclass."""
     module = d.load_layout(SCENE)
-    road = module.build_road()
+    # road = module.build_road()  # old plain-Road path, commented out -- RegulatedRoad
+    # is now the project-wide default (see scene_background.RegulatedRoad -- plain, not the
+    # Visible/magenta variant, since this headless test never renders); render
+    # is provably unaffected, this only adds priority-based yielding on top.
+    road = sb.RegulatedRoad(network=module.build_road().network)
     human = h.add_human_vehicle(road, module.HUMAN_ROUTE, enable_fov=False, enable_occlusion=False)
     sb.add_background_traffic(road, count=80, seed=0)  # seed/count chosen to put real traffic near spawn
     candidates = sb.nearby_vehicles(road, human, 35.0)
@@ -121,7 +125,11 @@ def check_ablation_matches_unfiltered_logic():
     perception it's supposed to be limited to.
     """
     module = d.load_layout(SCENE)
-    road = module.build_road()
+    # road = module.build_road()  # old plain-Road path, commented out -- RegulatedRoad
+    # is now the project-wide default (see scene_background.RegulatedRoad -- plain, not the
+    # Visible/magenta variant, since this headless test never renders); render
+    # is provably unaffected, this only adds priority-based yielding on top.
+    road = sb.RegulatedRoad(network=module.build_road().network)
     human = h.add_human_vehicle(road, module.HUMAN_ROUTE, enable_fov=False, enable_occlusion=False)
     sb.add_background_traffic(road, count=80, seed=0)  # seed/count chosen to put real traffic near spawn
     lane_indexes = sb.all_lane_indexes(road)
@@ -165,7 +173,11 @@ def run_unit_checks():
 
 def run_one(fov_deg, seed, background_count=28, steps=1800, enable_occlusion=True, log_prefix=""):
     module = d.load_layout(SCENE)
-    road = module.build_road()
+    # road = module.build_road()  # old plain-Road path, commented out -- RegulatedRoad
+    # is now the project-wide default (see scene_background.RegulatedRoad -- plain, not the
+    # Visible/magenta variant, since this headless test never renders); render
+    # is provably unaffected, this only adds priority-based yielding on top.
+    road = sb.RegulatedRoad(network=module.build_road().network)
     human = h.add_human_vehicle(road, module.HUMAN_ROUTE, fov_deg=fov_deg,
                                  enable_occlusion=enable_occlusion)
     # Bias spawn density toward lanes the human's own route actually comes

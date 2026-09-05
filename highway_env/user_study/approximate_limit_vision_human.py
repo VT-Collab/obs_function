@@ -75,7 +75,7 @@ PER TICK (see advance()):
 """
 import numpy as np
 
-import scene1_background as sb
+import scene_background as sb
 from limit_vision_human import LimitedVisionHuman, _route_progress, _unstick_if_frozen
 
 
@@ -133,7 +133,7 @@ class ApproximateLimitVisionHuman(LimitedVisionHuman):
         own arc, a car occupying a lane-change's target lane, or ring
         traffic near a roundabout's own entry/exit point. Pure geometry
         (positions projected onto the maneuver's own lane objects), same
-        category of check as scene1_background.find_front_vehicle's own
+        category of check as scene_background.find_front_vehicle's own
         lane-projection, just scoped to whatever's actually visible.
 
         Widened from an original (22.0, 3.0): even with 3 robots plus 35

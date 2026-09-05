@@ -7,7 +7,7 @@ os.environ['SDL_VIDEODRIVER'] = 'dummy'
 import numpy as np
 import types
 import display_all as d
-import scene1_background as sb
+import scene_background as sb
 import limit_vision_human as h
 from subtasks import build_subtasks, seed_maneuver_traffic, DISPLAY_NAME
 from approximate_limit_vision_human import ApproximateLimitVisionHuman, available_choices
@@ -22,7 +22,12 @@ FOV_CANDIDATES = (30.0, 60.0, 90.0, 180.0, 360.0)
 
 def run(scene, true_fov, seed, n_robots=3, background_count=35, robot_weight_seen=1.0, steps=6000):
     module = d.load_layout(scene)
-    road = module.build_road()
+    # road = module.build_road()  # old plain-Road path, commented out -- RegulatedRoad
+    # is now the project-wide default (see scene_background.VisibleRegulatedRoad); render
+    # is provably unaffected (_compare_regulated_render.py, all 10 layouts byte-for-byte
+    # identical either way), this only adds its own priority-based yielding on top,
+    # alongside this project's own crossing_conflict_brake.
+    road = sb.VisibleRegulatedRoad(network=module.build_road().network)
     subtasks = build_subtasks(module, 'human')
 
     start = np.asarray(module.HUMAN_ROUTE[0], dtype=float)

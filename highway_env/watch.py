@@ -34,7 +34,7 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "human"))
 sys.path.insert(0, os.path.join(_HERE, "layout"))
 import display_all as d  # noqa: E402
-import scene1_background as sb  # noqa: E402
+import scene_background as sb  # noqa: E402
 import limit_vision_human as h  # noqa: E402
 import fov_render as fr  # noqa: E402
 from highway_env.road.graphics import RoadGraphics, WorldSurface  # noqa: E402
@@ -48,12 +48,14 @@ BLIND_COLOR = (70, 70, 82)  # same bluish-grey tint steakhouse/misha uses for th
 FOV_CANDIDATES = (30.0, 60.0, 90.0, 180.0, 360.0)
 STATUS_COLOR = (255, 230, 0)  # bright yellow -- readable over both road grey and the blind-area tint
 STATUS_OFFSET_PX = 14  # how far above each vehicle's own center the --debug-status label sits
+ROW_COLOR = (0, 230, 255)  # cyan -- distinct from --debug-status' own yellow, since both can be on at once
+ROW_OFFSET_PX = 28  # above STATUS_OFFSET_PX's own label, so the two never overlap when both flags are on
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--scene", default=SCENE, help=f"layout to load (default {SCENE}; e.g. real_005_rebuilt for a different junction chain -- see layout/layouts/ for the full set, or layout/other_layouts/ for mega_scene, crossing_turn, and the real_NNN map-derived scenes)")
-    parser.add_argument("--count", type=int, default=18, help="number of background vehicles (default 18 -- these compact chained-junction layouts have much smaller capacity than a real recorded map; mega_scene measured 40+ as a permanent gridlock, not just a slowdown, and these are similarly small)")
+    parser.add_argument("--count", type=int, default=100, help="number of background vehicles (default 18 -- these compact chained-junction layouts have much smaller capacity than a real recorded map; mega_scene measured 40+ as a permanent gridlock, not just a slowdown, and these are similarly small)")
     parser.add_argument("--seed", type=int, default=0, help="random seed (default 0)")
     parser.add_argument("--dt", type=float, default=1 / 15, help="simulation timestep in seconds (default 1/15)")
     parser.add_argument("--steps", type=int, default=None, help="stop after this many steps (default: run until closed)")
@@ -67,7 +69,14 @@ def main():
                               "-- an ordinary leader ahead / CROSS TRAFFIC -- a different-heading vehicle whose "
                               "own path crosses this one, e.g. at a junction / STOPPED -- no specific cause "
                               "found), re-derived from the exact same checks that vehicle's own driving logic "
-                              "runs -- see scene1_background.vehicle_status_label")
+                              "runs -- see scene_background.vehicle_status_label")
+    parser.add_argument("--debug-right-of-way", action="store_true",
+                         help="label every RegulatedRoad-yielding vehicle with its own lane.priority, who "
+                              "it's yielding to, and THAT vehicle's own current speed -- flagged FROZEN? "
+                              "once that speed is near zero, the exact signature of a vehicle deferring "
+                              "forever to a partner that isn't actually going anywhere either (respect_"
+                              "priorities' own tie-break has no notion of that, unlike this project's own "
+                              "crossing_conflict_brake) -- see scene_background.right_of_way_debug_label")
     parser.add_argument("--chase", action="store_true", help="ego/chase camera centered on the human, rotated so its heading always points up (still grey, not black -- you're still the observer)")
     parser.add_argument("--scale", type=float, default=10.0, help="pixels per meter in --chase mode (default 10)")
     parser.add_argument("--no-robot", action="store_true", help="skip spawning the robot + live FOV posterior readout")
@@ -94,7 +103,12 @@ def main():
         args.robot_vehicle, args.robot_policy = combo
 
     module = d.load_layout(args.scene)
-    road = module.build_road()
+    # road = module.build_road()  # old plain-Road path, commented out -- RegulatedRoad
+    # is now the project-wide default (see highway_env/road/regulation.py); rendering is
+    # provably unaffected (layout/layouts/_compare_regulated_render.py, all 10 layouts
+    # byte-for-byte identical either way), this only adds its own lane.priority-based
+    # yielding on top, alongside this project's own crossing_conflict_brake.
+    road = sb.VisibleRegulatedRoad(network=module.build_road().network)
     human = h.add_human_vehicle(road, module.HUMAN_ROUTE, fov_deg=args.fov,
                                  enable_fov=not args.no_fov, enable_occlusion=not args.no_occlusion)
 
@@ -120,7 +134,8 @@ def main():
     print(f"WATCH {args.scene}: {len(road.vehicles)} vehicles (1 LimitedVisionHuman, fov={args.fov:.0f} "
           f"occlusion={'on' if not args.no_occlusion else 'off'}"
           f"{f', robot={args.robot_vehicle}/{args.robot_policy}' if robot is not None else ''}"
-          f"{', chase cam' if args.chase else ''}) -- grey is what the HUMAN cannot see, you see it all")
+          f"{', chase cam' if args.chase else ''}, RegulatedRoad (magenta = yielding)) "
+          f"-- grey is what the HUMAN cannot see, you see it all")
 
     pygame.init()
     desktop = pygame.display.Info()
@@ -234,6 +249,18 @@ def main():
                     sx, sy = surface.vec2pix(v.position)
                 text = status_font.render(label, True, STATUS_COLOR)
                 frame.blit(text, (sx - text.get_width() / 2.0, sy - STATUS_OFFSET_PX))
+
+        if args.debug_right_of_way:
+            for v in road.vehicles:
+                label = sb.right_of_way_debug_label(v)
+                if label is None:
+                    continue
+                if args.chase:
+                    sx, sy = fr.chase_screen_pos(human, v.position, args.scale, chase_anchor)
+                else:
+                    sx, sy = surface.vec2pix(v.position)
+                text = status_font.render(label, True, ROW_COLOR)
+                frame.blit(text, (sx - text.get_width() / 2.0, sy - ROW_OFFSET_PX))
 
         belief_str = ""
         if posterior is not None:

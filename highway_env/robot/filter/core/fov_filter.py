@@ -163,7 +163,7 @@ class FOVFilter:
         .dt, and optionally .occluders (nearby vehicles for the rollout's
         own occlusion check; treated as empty if absent) and
         .crossing_conflict_accel (a hard deceleration ceiling from the
-        caller's own scene1_background.crossing_conflict_brake() check --
+        caller's own scene_background.crossing_conflict_brake() check --
         see below; treated as no constraint if absent). Falls back to
         the plain baseline accel whenever there's no human/belief to
         reason about, or the belief isn't confident enough yet (self.

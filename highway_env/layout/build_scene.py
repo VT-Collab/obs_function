@@ -6,6 +6,7 @@ import os
 import numpy as np
 import pygame
 from highway_env.road.road import Road, RoadNetwork
+from highway_env.road.regulation import RegulatedRoad
 from highway_env.road.lane import StraightLane, CircularLane, SineLane, LineType, AbstractLane
 from highway_env.road.graphics import RoadGraphics, WorldSurface
 
@@ -1165,7 +1166,10 @@ def _render_cell(d, demo, cell_w, cell_h):
     the __main__ grid below can call it once per primitive instead of
     repeating it five times."""
     net = demo["net"]
-    road = Road(network=net)
+    # road = Road(network=net)  # old plain-Road path, commented out -- RegulatedRoad
+    # is now the project-wide default. Inert here (this only renders a static
+    # primitive-demo grid, never steps the road), kept for consistency.
+    road = RegulatedRoad(network=net)
     view_window = demo.get("view_window")
     if view_window is not None:
         min_x, max_x, min_y, max_y = view_window

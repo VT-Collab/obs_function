@@ -3,12 +3,12 @@ occlusion by other vehicles' bodies, with ZERO memory of anything once it
 leaves that cone. Drives a fixed path through scene 1 (HUMAN_ROUTE).
 
 Everything this feature needs lives in this file and this directory --
-scene1_background.py is used strictly as an unmodified library (imported,
+scene_background.py is used strictly as an unmodified library (imported,
 never edited), by explicit instruction, so this experimental feature cannot
 put the now-stable, hard-won background-traffic simulation at risk. Two
 pieces of logic below (route_aware_continuation, apply_human_aware_car_
 following/advance_vehicles_with_route) are therefore small, deliberate
-duplicates of scene1_background.find_continuation()/apply_better_car_
+duplicates of scene_background.find_continuation()/apply_better_car_
 following()/advance_vehicles() rather than parameters added to those
 functions -- see each one's docstring for exactly what it reuses vs repeats.
 
@@ -35,7 +35,7 @@ last-known position for one tick. Two reasons, not one:
   2. It would quietly reintroduce prediction. This project has a separate,
      hard, pre-existing rule that IDM/crossing-brake react to CURRENT state
      only, never a simulated future (see crossing_conflict_brake's own
-     docstring in scene1_background.py). A remembered position of a MOVING
+     docstring in scene_background.py). A remembered position of a MOVING
      vehicle, reacted to as if still current, is an extrapolation of exactly
      that kind -- and at highway speeds (8-14 m/s) a memory even 1-2 seconds
      stale is already wrong by more than the distances (10-22m) this module
@@ -52,7 +52,7 @@ lane-graph destination -- stock ControlledVehicle.plan_route_to() needs a
 connected road-network graph to BFS over, which this fragmented real map
 (~115 disconnected polyline fragments) doesn't have; that's the whole reason
 find_continuation()/advance_vehicles() exist as a custom replacement in
-scene1_background.py in the first place. So route-following here is NOT the
+scene_background.py in the first place. So route-following here is NOT the
 stock .route/plan_route_to machinery -- it's a bias on the SAME fork-choice
 find_continuation() already makes at the end of a fragment: among whatever
 candidates pass the existing safety gates (max_dist, max_heading_diff_deg,
@@ -90,7 +90,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # highway_env/
-import scene1_background as sb  # noqa: E402
+import scene_background as sb  # noqa: E402
 from common.geometry import in_cone, is_occluded, segment_intersects_rotated_rect  # noqa: E402,F401
 
 FOV_DEG_DEFAULT = 120.0
@@ -135,7 +135,7 @@ def route_total_length(route_points):
 
 def route_aware_continuation(road, lane_indexes, vehicle, route_points,
                               max_dist=8.0, max_heading_diff_deg=60.0):
-    """A copy of scene1_background.find_continuation()'s candidate search
+    """A copy of scene_background.find_continuation()'s candidate search
     (same two safety gates, byte-for-byte: max_dist on start-point distance,
     max_heading_diff_deg on heading match), but re-ranked by progress along
     `route_points` instead of purely by nearest-start-point distance, when a
@@ -143,7 +143,7 @@ def route_aware_continuation(road, lane_indexes, vehicle, route_points,
 
     WHY A SEPARATE COPY rather than a `route=` parameter added to the real
     find_continuation(): this feature's explicit scope is "keep all changes
-    in highway_env/human" -- scene1_background.py is not edited for this.
+    in highway_env/human" -- scene_background.py is not edited for this.
 
     WHY THIS MATTERS BEYOND CONVENIENCE: plain find_continuation() has no
     memory of which fragments a vehicle has already visited, so nothing
@@ -301,17 +301,17 @@ def add_human_vehicle(road, route_points, fov_deg=FOV_DEG_DEFAULT, speed=10.0, *
     return human
 
 
-# -- per-step orchestration, entirely additive on top of scene1_background --
+# -- per-step orchestration, entirely additive on top of scene_background --
 
 def apply_human_aware_car_following(road, lane_indexes, dt, radius=35.0):
-    """Runs scene1_background.apply_better_car_following() FIRST, unmodified
+    """Runs scene_background.apply_better_car_following() FIRST, unmodified
     -- every vehicle, including any LimitedVisionHuman on the road, gets
     exactly the same fragment-aware/crossing-conflict-aware action background
     traffic already gets. Then, for each LimitedVisionHuman, OVERWRITES just
     its own acceleration using ONLY visible_candidates() -- strictly additive
     on top of the existing, already-hardened per-step logic; nothing about
     how background traffic is computed changes, and this file never touches
-    scene1_background.py itself.
+    scene_background.py itself.
 
     Call in place of (not in addition to) apply_better_car_following().
 
@@ -329,7 +329,7 @@ def apply_human_aware_car_following(road, lane_indexes, dt, radius=35.0):
     act on anything outside of FOV"). No real coverage is lost: find_front_
     vehicle() is a strict superset of what that stock check finds (same
     lane AND the fragment-continuation near its end, vs. exact-lane-index
-    only -- see find_front_vehicle's own docstring in scene1_background.py).
+    only -- see find_front_vehicle's own docstring in scene_background.py).
     """
     sb.apply_better_car_following(road, lane_indexes, dt, radius=radius)
     _unstick_frozen_background(road, dt)
@@ -368,7 +368,7 @@ STALL_TIMEOUT_S = 20.0  # how long the human can be genuinely motionless before 
 
 
 def _unstick_if_frozen(road, human, front, visible, dt):
-    """crossing_conflict_brake's own tie-break (scene1_background.py) is
+    """crossing_conflict_brake's own tie-break (scene_background.py) is
     extensively tuned to resolve most head-on/crossing standoffs without
     ever forcing an unsafe release, but its own docstring documents real,
     remaining cases -- two vehicles from different lanes both stopped right
@@ -379,7 +379,7 @@ def _unstick_if_frozen(road, human, front, visible, dt):
     own "never strand the human" rule).
 
     Scoped as narrowly as possible to avoid the exact destabilization
-    scene1_background.py's advance_vehicles() docstring already warned
+    scene_background.py's advance_vehicles() docstring already warned
     about for a broader "touch anything stationary" rule: only ever
     retreats ONE vehicle -- the human's own immediate front_vehicle if it
     has one, else (measured necessary: a human repeatedly re-triggering
@@ -494,7 +494,7 @@ def _resolve_stuck_route_pair(road, dt, retreat=12.0, clear_dist=10.0, retreat_s
     5.0 IS Vehicle.LENGTH (see kinematics.py), so two vehicles left
     exactly nose-to-tail on the same lane at that distance have zero real
     body clearance, not a safety margin. Confirmed as a live bug, not
-    theoretical, in scene1_background._retreat_if_safe's own general
+    theoretical, in scene_background._retreat_if_safe's own general
     form of this same mechanism: a 60-vehicle background-only run at the
     old flat 5.0 threshold produced 4 new collisions, traced to exactly
     this nose-to-tail configuration at 5.18m. 7.0 leaves a real ~2m body
@@ -566,7 +566,7 @@ BACKGROUND_STALL_TIMEOUT_S = 25.0  # longer than STALL_TIMEOUT_S -- the human's 
 
 def _unstick_frozen_background(road, dt, timeout_s=BACKGROUND_STALL_TIMEOUT_S):
     """Background-traffic analogue of _unstick_if_frozen -- same idea, wider
-    net. crossing_conflict_brake's tie-break (scene1_background.py)
+    net. crossing_conflict_brake's tie-break (scene_background.py)
     resolves nearly every standoff, but its own docstring documents a real
     remaining case it deliberately leaves open for anonymous traffic: two
     vehicles from different lanes/rings both stopped right at a shared
@@ -592,7 +592,7 @@ def _unstick_frozen_background(road, dt, timeout_s=BACKGROUND_STALL_TIMEOUT_S):
     applied network-wide instead of only to the human's immediate blocker.
 
     RETREATS (sb._retreat_if_safe), never removes -- delegates to
-    scene1_background.unstick_stalled_traffic, the general form of this
+    scene_background.unstick_stalled_traffic, the general form of this
     exact mechanism (see its own docstring for the full reasoning and the
     confirmed permanent-freeze test that motivated it). An earlier version
     despawned the stalled vehicle outright; deleting a car that's simply
@@ -615,12 +615,12 @@ def _unstick_frozen_background(road, dt, timeout_s=BACKGROUND_STALL_TIMEOUT_S):
 
 
 def advance_vehicles_with_route(road, lane_indexes):
-    """A copy of scene1_background.advance_vehicles(), byte-for-byte
+    """A copy of scene_background.advance_vehicles(), byte-for-byte
     identical in structure, except the fork-choice at the end of a fragment
     uses route_aware_continuation() (falls back to plain find_continuation()
     for any vehicle without a route_points attribute, i.e. every background
     vehicle) instead of calling find_continuation() directly. Kept as a full
-    copy rather than a shared helper so scene1_background.py needs no
+    copy rather than a shared helper so scene_background.py needs no
     changes for this feature.
 
     Call in place of (not in addition to) advance_vehicles().
@@ -630,7 +630,7 @@ def advance_vehicles_with_route(road, lane_indexes):
     directly to opt a robot into route_aware_continuation too, so this is
     NOT the same set as "LimitedVisionHuman instances") NEVER GETS
     DESPAWNED AT A DEAD END, unlike background traffic. Background despawn-
-    at-a-genuine-dead-end is fine for anonymous traffic (scene1_background.
+    at-a-genuine-dead-end is fine for anonymous traffic (scene_background.
     py's own advance_vehicles() docstring says as much), but silently
     deleting the human this whole feature exists to study -- or a robot a
     live participant can see driving around -- is a much worse failure than
@@ -642,7 +642,7 @@ def advance_vehicles_with_route(road, lane_indexes):
 
     A CRASHED BACKGROUND VEHICLE (crashed, not a LimitedVisionHuman -- see
     the isinstance check below, not a route_points check) IS ALWAYS
-    REMOVED, unlike scene1_background.advance_vehicles() which leaves it in
+    REMOVED, unlike scene_background.advance_vehicles() which leaves it in
     place. That's fine on real_001's own multi-lane-equivalent fragment
     graph (a wreck rarely owns the only path forward), but a route-following
     human here can be confined to a single lane through a junction (see

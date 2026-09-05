@@ -230,7 +230,7 @@ def route_adjacent_lane_indexes(radius=15.0):
     """Every (from, to, lane_id) in a freshly-built network whose lane
     passes within `radius` meters of some point on HUMAN_ROUTE.
 
-    For scene1_background.add_background_traffic's own lane_indexes param:
+    For scene_background.add_background_traffic's own lane_indexes param:
     on a large real recorded map, spawning uniformly over every lane still
     puts plenty of traffic near any given route. Mega_scene is much
     smaller AND a good fraction of its lanes are stubs the human's own

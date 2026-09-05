@@ -15,7 +15,7 @@ never a task/route identity, so a policy can't accidentally special-case
 to avoid:
     ctx.robot           the robot IDMVehicle
     ctx.front_vehicle   whatever's directly ahead of the robot in its own
-                        lane (scene1_background.find_front_vehicle's
+                        lane (scene_background.find_front_vehicle's
                         result) -- ordinary car-following target
     ctx.human           the LimitedVisionHuman, or None if out of range
     ctx.belief          FOVPosterior.beliefs() dict, or None if this

@@ -31,7 +31,7 @@ sys.path.insert(0, _HIGHWAY_ENV_DIR)
 sys.path.insert(0, os.path.join(_HIGHWAY_ENV_DIR, "layout"))
 sys.path.insert(0, _HUMAN_DIR)
 import display_all as d  # noqa: E402
-import scene1_background as sb  # noqa: E402
+import scene_background as sb  # noqa: E402
 import limit_vision_human as h  # noqa: E402
 from robot.methods import make_baseline  # noqa: E402
 from robot.nominal_policy.vehicles import make_vehicle  # noqa: E402
@@ -59,7 +59,12 @@ def run_episode(scene, fov, seed, method, steps=1800, background_count=28, robot
     method="fov_aware".
     """
     module = d.load_layout(scene)
-    road = module.build_road()
+    # road = module.build_road()  # old plain-Road path, commented out -- RegulatedRoad
+    # is now the project-wide default (see scene_background.VisibleRegulatedRoad); render
+    # is provably unaffected (layout/layouts/_compare_regulated_render.py, all 10 layouts
+    # byte-for-byte identical either way), this only adds its own priority-based yielding
+    # on top, alongside this project's own crossing_conflict_brake.
+    road = sb.VisibleRegulatedRoad(network=module.build_road().network)
 
     human = h.add_human_vehicle(road, module.HUMAN_ROUTE, fov_deg=fov)
 

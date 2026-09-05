@@ -49,7 +49,7 @@ import re
 import numpy as np
 
 from highway_env.road.lane import CircularLane, SineLane
-from scene1_background import NoResnapIDMVehicle
+from scene_background import NoResnapIDMVehicle
 
 _TURN_FROM = re.compile(r"_ir\d+_\d+$")
 _TURN_TO = re.compile(r"_il\d+_\d+$")
@@ -158,7 +158,7 @@ def seed_maneuver_traffic(road, subtasks_list, seed=0, speed_range=(1.2, 2.5), n
     """Spawn dedicated IDMVehicle(s) directly onto EACH non-forward span's
     own upcoming lane(s) -- turn/lane_change/merge_in/merge_out -- partway
     along it, at a modest speed. Call AFTER human/robots are already in
-    road.vehicles and BEFORE scene1_background.add_background_traffic, so
+    road.vehicles and BEFORE scene_background.add_background_traffic, so
     (a) this can skip a spot too close to an already-placed vehicle, and
     (b) add_background_traffic's own placement check (which reads
     `road.vehicles` fresh) naturally avoids stacking random traffic on top

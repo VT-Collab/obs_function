@@ -14,7 +14,7 @@ classes (verified against the installed package, not assumed):
 IDMVehicle (nonlinear IDM formula), LinearVehicle (IDMVehicle subclass, a
 linear-in-features formula instead), AggressiveVehicle/DefensiveVehicle
 (LinearVehicle subclasses, two preset parameter tunings). All four need
-scene1_background.NoResnapIDMVehicle's own on_state_update() override
+scene_background.NoResnapIDMVehicle's own on_state_update() override
 (disables the default per-step "resnap to closest lane in the whole
 network", which is both expensive and actively wrong once lane
 transitions are managed manually by advance_vehicles_with_route) -- the
@@ -32,11 +32,11 @@ from).
 """
 from highway_env.vehicle.behavior import IDMVehicle, LinearVehicle, AggressiveVehicle, DefensiveVehicle
 
-import scene1_background as sb
+import scene_background as sb
 
 
 class _NoResnapMixin:
-    """See scene1_background.NoResnapIDMVehicle's own docstring for why
+    """See scene_background.NoResnapIDMVehicle's own docstring for why
     this is needed at all -- identical override, just mixed into the
     other three IDMVehicle-family classes instead of copied."""
 

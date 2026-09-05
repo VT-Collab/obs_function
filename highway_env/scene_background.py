@@ -1,8 +1,8 @@
 """Watch scene 1's background traffic actually drive, not just sit there.
 
-    python scene1_background.py
-    python scene1_background.py --count 20 --seed 7
-    python scene1_background.py --steps 600 --dt 0.05
+    python scene_background.py
+    python scene_background.py --count 20 --seed 7
+    python scene_background.py --steps 600 --dt 0.05
 
 This is the animated version of the idea in the enrich_scene.py snippet
 from chat: that one only placed IDMVehicle instances at a random starting
@@ -46,7 +46,9 @@ import pygame
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "layout"))
 import display_all as d  # noqa: E402
 from highway_env.road.graphics import RoadGraphics, WorldSurface  # noqa: E402
+from highway_env.road.regulation import RegulatedRoad  # noqa: E402
 from highway_env.vehicle.behavior import IDMVehicle  # noqa: E402
+from highway_env.vehicle.controller import ControlledVehicle, MDPVehicle  # noqa: E402
 
 SCENE = "real_001_rebuilt"
 
@@ -69,6 +71,133 @@ class NoResnapIDMVehicle(IDMVehicle):
 
     def on_state_update(self) -> None:
         pass
+
+
+VISIBLE_REGULATED_ROAD_YIELDING_COLOR = (200, 0, 200)  # magenta -- see VisibleRegulatedRoad's own docstring
+
+
+class VisibleRegulatedRoad(RegulatedRoad):
+    """The project-wide default Road class -- highway_env's own
+    RegulatedRoad (highway_env.road.regulation), with two things changed
+    purely for on-screen observability. Neither touches WHETHER a
+    conflict is detected or who's picked to yield, only how visible the
+    result is; shared here (not redefined per script) so every one of
+    play.py/watch.py/interface.py/test scripts/harnesses builds the exact
+    same class instead of six near-identical copies drifting apart.
+
+    Layout/geometry are UNCHANGED either way -- verified byte-for-byte
+    identical render across all ten real_NNN layouts, both the plain-Road
+    and RegulatedRoad paths, in layout/layouts/_compare_regulated_render.py
+    -- RegulatedRoad only adds behavior via its own step(dt) override,
+    which a static render never calls. Runs ALONGSIDE this project's own
+    crossing_conflict_brake (labeled "CROSS TRAFFIC" by watch.py's
+    --debug-status), not instead of it -- nothing here disables that.
+
+    YIELDING_COLOR: the base class's own default is None, which
+    VehicleGraphics.get_color() treats as "no override" (falls back to
+    the vehicle's type-based color), so a yielding vehicle would
+    otherwise look completely unremarkable on screen -- the whole point
+    of using this class is to be able to SEE highway_env's own
+    regulation.py mechanism act.
+
+    YIELD_DURATION: the base class's own default is 0.0, which means
+    `yield_timer >= YIELD_DURATION * REGULATION_FREQUENCY` (the release
+    condition) is true immediately -- a vehicle un-freezes on the very
+    NEXT enforce_road_rules() call, roughly half a second later at the
+    default REGULATION_FREQUENCY=2. Confirmed directly: instrumenting a
+    1500-step run found 17 real yield events, each lasting under half a
+    second -- genuinely firing, just too brief to reliably catch on
+    screen or even notice while watching. 1.0s makes a yield actually
+    observable without changing when one starts or who it picks.
+    """
+    YIELDING_COLOR = VISIBLE_REGULATED_ROAD_YIELDING_COLOR
+    YIELD_DURATION = 1.0
+
+    # A vehicle below this speed for at least this many CONSECUTIVE ticks
+    # (v._stopped_ticks, maintained every tick by apply_better_car_
+    # following -- see its own docstring) counts as genuinely frozen, not
+    # just momentarily braking. 15 ticks ~= 1.0s at this project's own
+    # standard dt=1/15 (every CLI entry point here defaults to that) --
+    # long enough that ordinary IDM deceleration into a stop doesn't
+    # trigger it, short enough to catch a real freeze within one or two
+    # REGULATION_FREQUENCY cycles (~0.5-1.0s apart) instead of many.
+    FROZEN_SPEED_THRESHOLD = 0.5  # m/s -- matches vehicle_status_label's own "STOPPED" cutoff
+    FROZEN_TICKS_THRESHOLD = 15
+
+    def enforce_road_rules(self) -> None:
+        """The base class's own enforce_road_rules() (see highway_env.road.
+        regulation.RegulatedRoad), with two changes -- both purely about
+        WHETHER/how a yield is recorded, never about is_conflict_possible
+        itself (still highway_env's own prediction, unchanged) or about
+        removing any vehicle from the scene (nothing here ever touches
+        self.vehicles' own membership; see unstick_stalled_traffic's own
+        docstring for why that's a hard project-wide rule, not a style
+        choice).
+
+        1. `.yield_to` bookkeeping (unchanged from the previous version of
+        this override): records WHICH vehicle a newly-yielding vehicle is
+        yielding TO, cleared again on unfreeze, purely for --debug-right-
+        of-way to read.
+
+        2. THE ACTUAL FIX: never let a NEW yield freeze a vehicle in
+        deference to a partner that's already frozen itself (see
+        FROZEN_SPEED_THRESHOLD/FROZEN_TICKS_THRESHOLD above). The base
+        class's own respect_priorities() (same lane.priority -- always
+        true here, since build_scene.py's own primitives never set one --
+        falls back to "whichever vehicle is behind yields") has no notion
+        of whether the vehicle it names as the winner can actually move.
+        Confirmed directly as a real, not hypothetical, cause of gridlock
+        at high vehicle counts (--debug-right-of-way, 45-vehicle stress
+        test: repeated "YIELD P0 -> P0 @0.0m/s FROZEN?" labels, average
+        scene speed collapsed to 0.15 m/s by the end of the run) -- NOT
+        because any single yield is permanent (YIELD_DURATION=1.0s always
+        releases it), but because the exact same unchanged conflict just
+        re-fires the exact same verdict on the very next regulation cycle
+        as long as neither vehicle has moved, which from outside is
+        indistinguishable from a permanent freeze -- a repeating stop/
+        release blip, not a one-time stop.
+
+        Skipping the yield here (`continue`, no state touched on either
+        vehicle at all) is safe, not just convenient: it doesn't grant
+        anyone right of way IDM/crossing_conflict_brake wouldn't already
+        separately enforce -- crossing_conflict_brake's own instantaneous,
+        purely-reactive check (see its own docstring) still runs every
+        tick regardless of what RegulatedRoad decides, so an actual close-
+        proximity crossing is still caught by the mechanism this project
+        already validated for exactly that job. This override only ever
+        removes an ANTICIPATORY freeze that would otherwise renew itself
+        indefinitely against a partner proven (by its own recent history,
+        not a guess) not to be going anywhere.
+        """
+        for v in self.vehicles:
+            if getattr(v, "is_yielding", False):
+                if v.yield_timer >= self.YIELD_DURATION * self.REGULATION_FREQUENCY:
+                    v.target_speed = v.lane.speed_limit
+                    delattr(v, "color")
+                    v.is_yielding = False
+                    v.yield_to = None
+                else:
+                    v.yield_timer += 1
+
+        for i in range(len(self.vehicles) - 1):
+            for j in range(i + 1, len(self.vehicles)):
+                v1, v2 = self.vehicles[i], self.vehicles[j]
+                if not self.is_conflict_possible(v1, v2):
+                    continue
+                yielding_vehicle = self.respect_priorities(v1, v2)
+                if yielding_vehicle is None:
+                    continue
+                winner = v2 if yielding_vehicle is v1 else v1
+                winner_ticks = getattr(winner, "_stopped_ticks", 0)
+                if winner.speed < self.FROZEN_SPEED_THRESHOLD and winner_ticks >= self.FROZEN_TICKS_THRESHOLD:
+                    continue  # winner has forfeited its own claim -- see docstring above
+                if (isinstance(yielding_vehicle, ControlledVehicle)
+                        and not isinstance(yielding_vehicle, MDPVehicle)):
+                    yielding_vehicle.color = self.YIELDING_COLOR
+                    yielding_vehicle.target_speed = 0
+                    yielding_vehicle.is_yielding = True
+                    yielding_vehicle.yield_timer = 0
+                    yielding_vehicle.yield_to = winner
 
 
 def off_road(vehicle):
@@ -337,6 +466,95 @@ def find_continuation(road, lane_indexes, vehicle, max_dist=8.0, max_heading_dif
     return best_idx
 
 
+# 3.0s (RegulatedRoad.is_conflict_possible's own default horizon) *
+# 14.0 m/s (add_background_traffic's own speed_range upper bound) = 42.0m
+# worst case, +8m margin -- how far ahead a route needs to reach so that
+# horizon never runs off the end of it.
+LOOKAHEAD_ROUTE_LENGTH = 50.0
+
+
+def build_lookahead_route(road, lane_index, min_length=LOOKAHEAD_ROUTE_LENGTH,
+                           max_segments=15, max_heading_diff_deg=60.0):
+    """A real, multi-segment highway_env-style route -- [lane_index, next
+    lane_index, ...] -- starting at `lane_index` and extending forward
+    along the lane graph until at least `min_length` meters of road are
+    covered (or `max_segments` fragments, or a dead end, whichever comes
+    first).
+
+    WHY THIS EXISTS: RegulatedRoad.enforce_road_rules() (highway_env's
+    own, now this project's road class everywhere -- see VisibleRegulatedRoad)
+    predicts each vehicle's position several seconds ahead via
+    ControlledVehicle.predict_trajectory_constant_speed(), which walks
+    `vehicle.route or [vehicle.lane_index]` forward using Road.network.
+    position_heading_along_route() -- and THAT function only ever advances
+    past a lane's own length when the given route has more than one
+    element (`while len(route) > 1 and longitudinal > lane.length: ...`).
+    This project's own background vehicles never had a `.route` (they're
+    driven by find_continuation/advance_vehicles reassigning `.lane_index`
+    tick by tick instead, a deliberate different design -- see
+    find_continuation's own docstring), so that fallback `[lane_index]`
+    was always exactly one element long -- meaning every prediction call
+    was silently evaluating lane.position(s, 0) for s values far past that
+    lane's own real length, on this project's own short (often 10-20m)
+    junction/roundabout/bridge fragments, for as much as 42m of predicted
+    travel. Confirmed directly as a real bug, not a hypothetical one: a
+    vehicle 24m from its "conflict" partner -- with that gap GROWING, not
+    closing -- braked hard to a dead stop for about half a second, purely
+    because both vehicles' garbage-extrapolated predicted positions
+    happened to satisfy the collision rectangle test. Not specific to
+    stitched-together bridge lanes -- the traced case was an ordinary
+    roundabout arc -- any lane shorter than the prediction horizon's own
+    reach is equally exposed, which on this project's own compact,
+    tightly-chained layouts (GAP=12m between primitives) is most of them.
+
+    Branch choice at a fork (a lane whose 'to' node has more than one
+    real successor -- e.g. a junction with several turning movements
+    leaving the same point) uses the exact same heading-continuity
+    principle find_continuation itself uses to resolve the live version of
+    this same ambiguity (closest start heading to the current lane's own
+    end heading, within max_heading_diff_deg) -- not a guess independent
+    of how the vehicle would actually be driven, and not a random pick
+    among physically implausible turns. This is a real, general graph walk
+    -- it works the same way for every layout's own junction/roundabout/
+    merge chain, not something re-derived per layout, since _lane_
+    successors() already captures each one's own real topology regardless
+    of which primitives built it.
+
+    A dead end (no successors -- a real network edge, e.g. a merge's own
+    "d" segment with nothing bridged past it) or exhausting max_segments
+    just returns however much route was actually built -- a real, valid,
+    if shorter-than-requested, route (highway_env's own position_heading_
+    along_route already clamps at a route's own last lane when longitudinal
+    overruns it, same as it always did for a single-lane route -- this
+    only ever makes that clamp point more accurate, never less safe).
+    """
+    path = [lane_index]
+    current = lane_index
+    remaining = min_length - road.network.get_lane(current).length
+    successors = _lane_successors(road)
+    while remaining > 0 and len(path) < max_segments:
+        succs = successors.get(current, ())
+        if not succs:
+            break
+        if len(succs) == 1:
+            next_index = next(iter(succs))
+        else:
+            cur_lane = road.network.get_lane(current)
+            cur_end_heading = cur_lane.heading_at(cur_lane.length)
+            next_index, best_diff = None, max_heading_diff_deg
+            for candidate in succs:
+                cand_heading = road.network.get_lane(candidate).heading_at(0)
+                diff = abs((np.degrees(cand_heading - cur_end_heading) + 180) % 360 - 180)
+                if diff < best_diff:
+                    next_index, best_diff = candidate, diff
+            if next_index is None:
+                break
+        path.append(next_index)
+        remaining -= road.network.get_lane(next_index).length
+        current = next_index
+    return path
+
+
 def nearby_vehicles(road, vehicle, radius):
     """Cheap Euclidean-distance pre-filter -- local_coordinates() involves
     a search over a lane's own polyline and is not O(1), so calling it for
@@ -348,7 +566,7 @@ def nearby_vehicles(road, vehicle, radius):
             and np.linalg.norm(o.position - vehicle.position) <= radius]
 
 
-def find_front_vehicle(road, vehicle, lane_indexes, candidates, lookahead=30.0, lateral_tol=3.0):
+def find_front_vehicle(road, vehicle, lane_indexes, candidates, lookahead=10.0, lateral_tol=3.0):
     """A better front_vehicle for IDM than road.neighbour_vehicles() gives:
     that call only considers vehicles on the exact same lane_index, but our
     real lane graph is fragmented (see find_continuation's docstring) --
@@ -668,6 +886,42 @@ def vehicle_status_label(road, vehicle, lane_indexes, radius=35.0, stopped_thres
     return f"STOPPED [{lane_str}]"
 
 
+def right_of_way_debug_label(vehicle, frozen_speed_threshold=0.5):
+    """Short debug string for watch.py's --debug-right-of-way, shown over
+    every vehicle RegulatedRoad currently has yielding (VisibleRegulatedRoad.
+    is_yielding -- see its own enforce_road_rules() override for `.yield_to`,
+    the addition that makes this possible at all).
+
+    Built to answer one specific question directly on screen: is a vehicle
+    yielding to another vehicle that is ITSELF not actually going anywhere
+    -- respect_priorities' own tie-break (highway_env.road.regulation:
+    equal lane.priority -> whichever vehicle is BEHIND yields) has no
+    concept of whether the vehicle it names as the "winner" can actually
+    move, unlike this project's own crossing_conflict_brake (see its own
+    docstring on `heads`/`_stopped_ticks`, built specifically so a vehicle
+    never defers forever to one that's frozen for an unrelated reason).
+    So the label always shows the TARGET's own current speed, flagged
+    "FROZEN?" once it's below `frozen_speed_threshold` -- the exact
+    signature of "car A yields to car B, but car B isn't moving either,"
+    which no other on-screen indicator (the base class's own YIELDING_COLOR
+    tint) distinguishes from an ordinary, resolving-shortly yield.
+
+    Returns None for a vehicle that isn't currently yielding (nothing to
+    show -- same convention as vehicle_status_label's own None-while-moving
+    return).
+    """
+    if not getattr(vehicle, "is_yielding", False):
+        return None
+    priority = getattr(vehicle.lane, "priority", None)
+    target = getattr(vehicle, "yield_to", None)
+    if target is None:
+        return f"YIELD P{priority} -> ?"
+    target_speed = float(target.speed)
+    frozen = " FROZEN?" if target_speed < frozen_speed_threshold else ""
+    target_priority = getattr(target.lane, "priority", None)
+    return f"YIELD P{priority} -> P{target_priority} @{target_speed:.1f}m/s{frozen}"
+
+
 def apply_better_car_following(road, lane_indexes, dt, radius=35.0):
     """Recompute each vehicle's acceleration using find_front_vehicle() and
     crossing_conflict_brake() instead of whatever road.act() (via
@@ -690,7 +944,15 @@ def apply_better_car_following(road, lane_indexes, dt, radius=35.0):
     zero, regardless of which check produced it.
 
     Call after road.act() and before road.step(dt) -- `dt` must be the
-    same timestep passed to that road.step() call.
+    same timestep passed to that road.step() call. This is also where
+    every vehicle's `.route` gets refreshed to build_lookahead_route()'s
+    own current value (see its own docstring for why): road.step(dt) is
+    where RegulatedRoad.enforce_road_rules() actually reads `.route` for
+    its own trajectory prediction, on whatever REGULATION_FREQUENCY
+    schedule it runs on -- refreshing it every tick here, unconditionally,
+    is simpler and cheaper than tracking that schedule separately, and a
+    short bounded graph walk recomputed every tick is not a meaningful
+    cost next to this function's own per-vehicle work.
 
     Two passes: the first just finds each vehicle's own front_vehicle
     (needed for the IDM override below regardless), and along the way
@@ -708,6 +970,7 @@ def apply_better_car_following(road, lane_indexes, dt, radius=35.0):
         # Pure history (v.speed is last step's already-integrated result,
         # nothing simulated forward), same category of state as .crashed.
         v._stopped_ticks = getattr(v, "_stopped_ticks", 0) + 1 if v.speed < 1.0 else 0
+        v.route = build_lookahead_route(road, v.lane_index)
         candidates = nearby_vehicles(road, v, radius)
         front = find_front_vehicle(road, v, lane_indexes, candidates)
         per_vehicle[id(v)] = (v, candidates, front)
@@ -854,7 +1117,7 @@ def unstick_stalled_traffic(road, dt, timeout_s=25.0, retreat=12.0, retreat_safe
     general form of what limit_vision_human.py's own _unstick_if_frozen/
     _unstick_frozen_background/_resolve_stuck_route_pair do for the human/
     robot specifically (see those for the fuller history); this is the
-    version usable by scene1_background.py's OWN main() loop, which has
+    version usable by scene_background.py's OWN main() loop, which has
     no human/robot and previously had no unstick mechanism of any kind --
     the exact gap that produced the permanent freeze above.
 
@@ -948,7 +1211,12 @@ def main():
     args = parser.parse_args()
 
     module = d.load_layout(SCENE)
-    road = module.build_road()
+    # road = module.build_road()  # old plain-Road path, commented out -- RegulatedRoad
+    # is now the project-wide default (see VisibleRegulatedRoad above); render is provably
+    # unaffected (layout/layouts/_compare_regulated_render.py, all 10 layouts byte-for-byte
+    # identical either way), this only adds its own priority-based yielding on top, shown
+    # in magenta since this demo is watched directly.
+    road = VisibleRegulatedRoad(network=module.build_road().network)
     add_background_traffic(road, count=args.count, seed=args.seed)
     print(f"{SCENE}: {len(road.vehicles)} background vehicles, stepping at dt={args.dt:.3f}s")
 

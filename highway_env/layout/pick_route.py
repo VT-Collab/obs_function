@@ -57,6 +57,7 @@ import numpy as np
 import pygame
 
 import display_all as d
+from highway_env.road.regulation import RegulatedRoad
 
 POINT_RADIUS = 5
 DIM_ALPHA = 90
@@ -141,7 +142,10 @@ def main():
     names = d.layout_names()
     name = d.resolve_scene(args.scene, names)
     module = d.load_layout(name)
-    road = module.build_road()
+    # road = module.build_road()  # old plain-Road path, commented out -- RegulatedRoad
+    # is now the project-wide default. Inert here (this tool only lets you click points
+    # on a static render, never steps the road), kept for consistency.
+    road = RegulatedRoad(network=module.build_road().network)
 
     def as_point_list(route):
         # Only a flat list of (x, y) points can be shown/edited here -- a

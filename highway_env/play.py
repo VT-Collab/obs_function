@@ -45,7 +45,7 @@ sys.path.insert(0, _HERE)
 sys.path.insert(0, os.path.join(_HERE, "human"))
 sys.path.insert(0, os.path.join(_HERE, "layout"))
 import display_all as d  # noqa: E402
-import scene1_background as sb  # noqa: E402
+import scene_background as sb  # noqa: E402
 import limit_vision_human as h  # noqa: E402
 import fov_render as fr  # noqa: E402
 from highway_env.road.graphics import RoadGraphics, WorldSurface  # noqa: E402
@@ -97,7 +97,13 @@ def main():
         args.robot_vehicle, args.robot_policy = combo
 
     module = d.load_layout(args.scene)
-    road = module.build_road()
+    # road = module.build_road()  # old plain-Road path, commented out -- RegulatedRoad
+    # is now the project-wide default (see scene_background.VisibleRegulatedRoad and
+    # highway_env/road/regulation.py); rendering is provably unaffected
+    # (layout/layouts/_compare_regulated_render.py, all 10 layouts byte-for-byte
+    # identical either way), this only adds its own lane.priority-based yielding on
+    # top, alongside this project's own crossing_conflict_brake.
+    road = sb.VisibleRegulatedRoad(network=module.build_road().network)
     human = h.add_human_vehicle(road, module.HUMAN_ROUTE, fov_deg=args.fov,
                                  enable_fov=not args.no_fov, enable_occlusion=not args.no_occlusion)
 

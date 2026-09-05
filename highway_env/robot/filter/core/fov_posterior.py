@@ -51,7 +51,7 @@ class FOVPosterior:
         tick (its true, already-computed action -- ground truth for the
         likelihood, not something this class computes).
         front_vehicle_fn(visible_list) -> front_vehicle: caller-supplied
-        (e.g. scene1_background.find_front_vehicle bound to the current
+        (e.g. scene_background.find_front_vehicle bound to the current
         road/lane_indexes), so this module never imports anything
         road/lane-specific -- it only ever sees whatever list of vehicle-
         like objects the caller hands it.

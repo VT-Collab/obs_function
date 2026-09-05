@@ -419,7 +419,7 @@ def route_adjacent_lane_indexes(build_network, route_points, radius=15.0):
     (a layout's own _build_network) -- called once here so this doesn't
     share a single mutable network with whatever the caller is stepping.
 
-    For scene1_background.add_background_traffic's own lane_indexes param:
+    For scene_background.add_background_traffic's own lane_indexes param:
     on a large real recorded map, spawning uniformly over every lane still
     puts plenty of traffic near any given route. A small synthetic network
     is much smaller AND a good fraction of its lanes are stubs a route

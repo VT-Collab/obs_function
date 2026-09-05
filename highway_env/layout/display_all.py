@@ -54,6 +54,7 @@ import pygame
 
 from highway_env.road.graphics import RoadGraphics, WorldSurface
 from highway_env.road.lane import StraightLane
+from highway_env.road.regulation import RegulatedRoad
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LAYOUTS_DIR = os.path.join(HERE, "layouts")
@@ -205,7 +206,7 @@ def draw_routes(surface, road, route, palette, lateral: float, name: str, label:
 
 
 def draw_bg_lanes(surface, road, lane_indexes, name: str):
-    """Highlight, in yellow, every lane scene1_background.add_background_traffic
+    """Highlight, in yellow, every lane scene_background.add_background_traffic
     would actually consider as a spawn candidate -- the exact
     route_adjacent_lane_indexes() set watch.py passes it as `lane_indexes`
     (see watch.py: `route_lanes = module.route_adjacent_lane_indexes(); sb.add_background_traffic(..., lane_indexes=route_lanes)`).
@@ -252,7 +253,7 @@ def draw_lane_arrows(surface, road, exclude=frozenset()):
     but not part of whatever route is currently being illustrated, where
     its own arrow would read as a stray, unexplained direction. Empty by
     default, so every other caller (play.py, watch.py,
-    scene1_background.py) is unaffected.
+    scene_background.py) is unaffected.
     """
     for from_node, tos in road.network.graph.items():
         for to_node, lanes in tos.items():
@@ -275,15 +276,42 @@ def draw_lane_arrows(surface, road, exclude=frozenset()):
 
 
 def render_offscreen(name, size=None, show_bg_lanes=True):
-    """Render a layout's road (+ HUMAN_ROUTE/ROBOT_ROUTE, + every lane
-    background traffic could spawn on, if defined) to its own Surface, fit
-    to the road's bounding box. None if it won't build."""
+    """Render a layout's road (+ HUMAN_ROUTE/ROBOT_ROUTE, + every lane in
+    the network, if show_bg_lanes) to its own Surface, fit to the road's
+    bounding box. None if it won't build.
+
+    Builds the network UNPRUNED -- prune_to_route (called at the end of
+    every layout's own _build_network, before this function ever sees the
+    result) deletes route alternatives a background vehicle would never
+    take, which is correct for the actual simulation but throws away real,
+    structurally-present lanes a preview render should still show (verified
+    directly against real_001_rebuilt.py's own locked reference render:
+    the pruned build left a real gap -- one whole lane's own approach
+    missing its road surface entirely, not just its yellow overlay --
+    while the unpruned build matched exactly). Patches _layout_utils.
+    prune_to_route to a no-op for the duration of THIS call only (restored
+    in finally below, even on a build failure) -- every layouts/*.py file
+    does `from _layout_utils import ... prune_to_route ...` at its own
+    module-exec time inside load_layout(), which binds whatever value is
+    on the module at that instant, so the patch has to be in place before
+    load_layout() runs, not after."""
+    import _layout_utils
+    original_prune = _layout_utils.prune_to_route
+    _layout_utils.prune_to_route = lambda net, *a, **k: None
     try:
         module = load_layout(name)
-        road = module.build_road()
+        # road = module.build_road()  # old plain-Road path, commented out --
+        # RegulatedRoad is now the project-wide default. Inert here specifically
+        # (RegulatedRoad's own added behavior only runs from its step(dt) override,
+        # which a static render never calls -- verified byte-for-byte identical
+        # either way in layout/layouts/_compare_regulated_render.py), kept only
+        # for consistency with every simulating caller.
+        road = RegulatedRoad(network=module.build_road().network)
     except Exception as e:
         print(f"  skipping {name}: {type(e).__name__}: {e}")
         return None
+    finally:
+        _layout_utils.prune_to_route = original_prune
 
     w, h = size or TILE_SIZE
     surface = WorldSurface((w, h), 0, pygame.Surface((w, h)))
@@ -297,15 +325,26 @@ def render_offscreen(name, size=None, show_bg_lanes=True):
     draw_lane_arrows(surface, road)
 
     if show_bg_lanes:
-        route_adjacent = getattr(module, "route_adjacent_lane_indexes", None)
-        if route_adjacent is not None:
-            try:
-                lane_indexes = route_adjacent()
-            except Exception as e:
-                print(f"  {name}: route_adjacent_lane_indexes() failed: {type(e).__name__}: {e}")
-                lane_indexes = None
-            if lane_indexes:
-                draw_bg_lanes(surface, road, lane_indexes, name)
+        # ALL lanes in the network, not module.route_adjacent_lane_indexes()
+        # (route-scoped, ~15m radius) -- that narrower set is correct for
+        # scene_background.add_background_traffic's own spawn-density
+        # bias (see that function's docstring), but this reference/preview
+        # render's own yellow overlay predates that narrowing and is meant
+        # to show every lane structurally reachable, not just ones near
+        # one specific route. Confirmed directly against the existing
+        # layout/rebuilt_renders/*.png references (which were generated
+        # before that narrowing): using the route-scoped set left large,
+        # visibly wrong gaps -- whole approaches missing their yellow
+        # overlay entirely -- while the full lane set matches those
+        # references almost exactly (down to a sub-pixel anti-aliasing
+        # floor of ~0.03-0.06% of channel bytes, unmoving across radius
+        # 50/100/200/all-lanes, so not a lane-set issue at all). Inlined
+        # here (not scene_background.all_lane_indexes) because that module
+        # imports this one -- importing it back would be circular.
+        lane_indexes = [(f, t, i) for f, tos in road.network.graph.items()
+                         for t, lanes in tos.items() for i in range(len(lanes))]
+        if lane_indexes:
+            draw_bg_lanes(surface, road, lane_indexes, name)
 
     human_route = getattr(module, "HUMAN_ROUTE", None)
     robot_route = getattr(module, "ROBOT_ROUTE", None)
